@@ -2,6 +2,12 @@
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
+Текущий трекер — `MeNn13/ai-for-developers-project-387`. Все новые задачи,
+спецификации и решения ведутся здесь. Старые issues и решения остаются в
+`MeNn13/ai-for-developers-project-386`: при ссылке на них используйте полный URL.
+Исходные [спецификация](https://github.com/MeNn13/ai-for-developers-project-386/issues/23)
+и [карта решений](https://github.com/MeNn13/ai-for-developers-project-386/issues/14).
+
 ## Conventions
 
 - **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.

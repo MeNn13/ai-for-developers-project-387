@@ -1,29 +1,238 @@
 # Календарь звонков (продолжение)
 
-
 [![hexlet-check](https://github.com/MeNn13/ai-for-developers-project-387/actions/workflows/hexlet-check.yml/badge.svg)](https://github.com/MeNn13/ai-for-developers-project-387/actions)
 
 Интегрируйте работу агентов в GitHub проект
 
-Учебный проект Хекслета: https://ru.hexlet.io/programs/ai-for-developers
-Как это должно работать: https://files.hexlet.app/a/2ipc5m
+Учебный проект Хекслета: <https://ru.hexlet.io/programs/ai-for-developers>
+Как это должно работать: <https://files.hexlet.app/a/2ipc5m>
+
+Приложение перенесено из [первого проекта](https://github.com/MeNn13/ai-for-developers-project-386).
+Исходные [спецификация #23](https://github.com/MeNn13/ai-for-developers-project-386/issues/23)
+и [карта решений #14](https://github.com/MeNn13/ai-for-developers-project-386/issues/14)
+остаются в старом трекере. Все новые задачи, спецификации и решения ведутся в
+[трекере этого проекта](https://github.com/MeNn13/ai-for-developers-project-387/issues).
+Сохранены [словарь](GLOSSARY.md), [ADR](docs/adr/) и [история изменений](CHANGELOG.md)
+со ссылками на исходные решения.
 
 ## Стек
 
-- Разное
+- Backend: .NET 10 (LTS), ASP.NET Core Minimal API.
+- Frontend: React 19, TypeScript, Vite 8, Mantine 9.
+- Контракт: TypeSpec 1.17 → OpenAPI 3.0 → TypeScript-клиент (Orval) и серверные C# DTO.
+- Тесты: xUnit + `WebApplicationFactory` на бэкенде, Vitest + Testing Library на
+  фронтенде.
+- Линтеры: анализаторы .NET + `dotnet format`, Oxlint, Prettier, rumdl.
+- Проверки: jactionlint, agnix, knip, syncpack, vacuum, oasdiff, betterleaks, OSV-Scanner, lychee.
+- Окружение: mise, hk, pitchfork.
+
+Версии инструментов зафиксированы в `mise.toml` и `mise.lock`, зависимости — в lock-файлах npm и NuGet.
 
 ## Установка
 
-<!-- Опишите установку: клонирование, зависимости, переменные окружения -->
+Установите Git и [mise](https://mise.jdx.dev/getting-started.html), затем выполните:
 
 ```bash
 git clone https://github.com/MeNn13/ai-for-developers-project-387.git
 cd ai-for-developers-project-387
+mise trust
+mise install
+mise run install
 ```
+
+Для локального запуска база данных, секреты и переменные окружения не нужны.
+При первом запуске браузерных тестов установите Chromium: `mise exec -- npx playwright install chromium`.
 
 ## Использование
 
-<!-- Добавьте примеры запуска и запись asciinema — именно это смотрит работодатель -->
+Запуск API и фронтенда:
+
+```bash
+mise run dev
+```
+
+- API: <http://127.0.0.1:5000/api/health>
+- Frontend: <http://127.0.0.1:5173>
+
+Управление фоновыми процессами:
+
+```bash
+mise daemons status
+mise daemons logs api -n 50
+mise daemons stop
+```
+
+Проверки:
+
+```bash
+mise run check
+```
+
+Одна команда запускает всё, что можно проверить локально: линтеры (анализаторы
+.NET и `dotnet format`, TypeSpec, Oxlint, Prettier, rumdl, jactionlint, agnix,
+knip, syncpack, vacuum), поиск секретов, проверку типов, тесты, сборку и сверку
+сгенерированных файлов с контрактом. CI вызывает эту же команду. Правила
+тестирования — где unit, где HTTP, где моки — в [AGENTS.md](AGENTS.md#правила).
+
+Ещё в CI есть отдельная задача `audit`:
+
+- `mise run check:audit` — проверки, которым нужна сеть или вся история git:
+  уязвимости в lock-файлах (OSV-Scanner), секреты в истории (betterleaks),
+  битые ссылки (lychee). Запускается на каждый PR и раз в неделю по расписанию.
+- Сообщения коммитов (`commitlint`) и совместимость OpenAPI с базовой веткой
+  (`oasdiff`) проверяются прямо в workflow: им нужен диапазон коммитов.
+
+Быстрые проверки изменённых файлов запускаются в `pre-commit`, полный
+`mise run check` — в `pre-push`. Автоисправления: `mise run fix`.
+
+Те же задачи доступны через корневой `Makefile`: `make install`, `make dev`,
+`make check`, `make lint`, `make test`, `make test-web`, `make build`,
+`make generate` и `make fix`. Makefile вызывает задачи mise, поэтому логика
+проверок остаётся общей с CI. Нужен GNU Make; на Windows, если `make` не
+установлен, используйте команды `mise run` напрямую.
+
+Генерация OpenAPI, клиента и серверных транспортных моделей:
+
+```bash
+mise run generate
+```
+
+`mise run install` также устанавливает изолированные зависимости серверного
+генератора по lock-файлу. Каждая генерация явно применяет проектный патч emitter
+`0.58.0-alpha.32`, проверяя версию и исходники. Патч исправляет required, nullable
+и DateOnly; его сопровождение принято в [ADR-0003](docs/adr/0003-generated-server-models.md).
+Generated C# в `backend/BookingCalendar.Api/Generated`, OpenAPI и клиент вручную
+не редактируются. `mise run generate:check` и первый шаг общего `check` сравнивают
+их со свежей генерацией в `artifacts/`, обнаруживают также удалённые и лишние файлы
+и сохраняют проверяемые артефакты. [Устройство, обновление и свидетельства
+приёмки](contract/server/README.md) описаны рядом с генератором.
+
+## Docker
+
+Проект собирается в один образ: ASP.NET Core отдаёт и API, и собранный фронтенд
+из `wwwroot`, поэтому проверяющему достаточно одного контейнера.
+
+```bash
+mise run docker:build
+docker run --rm -p 8080:8080 booking-calendar:local
+```
+
+Контейнер запускает приложение автоматически и слушает `0.0.0.0` на порту из
+переменной окружения `PORT` (по умолчанию `8080`). Например, другой порт:
+
+```bash
+docker run --rm -e PORT=19090 -p 8080:19090 booking-calendar:local
+```
+
+- приложение: <http://127.0.0.1:8080>
+- проверка: <http://127.0.0.1:8080/api/health>
+
+Полная проверка «образ собирается и контейнер отвечает» — то же, что делает CI:
+
+```bash
+mise run docker:check
+```
+
+Проверка задаёт `PORT=19090` внутри контейнера и проверяет API, главную страницу
+и прямые ссылки `/book` и `/owner`. Это смоук-проверка раздачи страниц;
+пользовательские действия в браузере она не выполняет. Внешний порт проверки —
+`18080`, его можно изменить переменной `IMAGE_CHECK_PORT`.
+
+Через Makefile: `make docker-build`, `make docker-run`, `make docker-check`.
+
+`Dockerfile` линтуется Hadolint в `mise run check`, базовые образы обновляет
+Dependabot.
+
+## Деплой и MCP
+
+Приложение: <https://booking-calendar-i16y.onrender.com>.
+Страницы: [запись](https://booking-calendar-i16y.onrender.com/book),
+[владелец](https://booking-calendar-i16y.onrender.com/owner).
+
+Опубликовано 6 ноября 2026 года: один Render Web Service на **Free**, workspace
+Hobby без привязанной карты. Runtime Docker, сборка из корневого `Dockerfile`,
+без БД и диска. Конфигурация — `render.yaml`; Blueprint использует ветку
+`chore/render-free-deploy`. Развёрнут коммит `de7a186`, автодеплой и автосинхронизация
+Blueprint отключены. Публикация документации не перезапускает приложение.
+В логе Render подтверждено `Now listening on: http://0.0.0.0:10000`:
+ENTRYPOINT использует платформенный `PORT`, переопределяющий default 8080.
+
+Публичная HTTP-приёмка 06.11.2026 в 15:43 UTC прошла в одном запуске приложения.
+Наблюдаемые ответы сохранены в
+[логе GitHub Actions](https://github.com/MeNn13/ai-for-developers-project-386/actions/runs/42245743447/job/127987377954):
+
+- `/api/health` — HTTP 200, `{"status":"ok"}`.
+- `/`, `/book`, `/owner` — HTTP 200 с HTML приложения.
+- Создание типа длительностью 60 минут — HTTP 201.
+- Бронирование 09.11.2026, 10:00–11:00 по Москве — HTTP 201;
+  созданная запись найдена в `GET /api/meetings` (HTTP 200).
+- Повторная запись на 10:00 и частичное пересечение с началом в 10:30 —
+  оба HTTP 409, `type: slot-taken`.
+
+Проверка выполнена с GitHub runner: локальное HTTPS-соединение агента
+с Render сбрасывалось. Владелец отдельно подтвердил в браузере открытие сайта,
+создание типа и запись; перезагрузка страницы сохранила данные.
+HTML-проверка маршрутов не проверяет отрисовку React в браузере.
+
+Для повторной HTTP-приёмки вручную запустить workflow `ci` на нужной ветке
+с `public_acceptance=true`. Опция по умолчанию выключена: она создаёт тестовый
+тип и встречу на публичном сервисе через `scripts/public-acceptance.mjs`.
+Это HTTP-проверка без браузерного E2E. Стандартный Ubuntu runner публичного
+репозитория бесплатен; этот job не использует кеш или загрузку артефактов.
+
+Проектная конфигурация Codex находится в `.codex/config.toml`. Оба MCP
+отключены (`enabled = false`) после деплоя. Настройка не содержит ключей
+или токенов. Порядок подключения владельцем аккаунта:
+
+1. Зарегистрироваться в Render и проверить условия аккаунта: бесплатный workspace
+   Hobby и тариф **Free у самого Web Service**. Платные тарифы, карта, пополнение
+   и платные ресурсы для этого учебного проекта запрещены. При запросе оплаты
+   остановиться. Если в аккаунте уже есть способ оплаты, не создавать ресурсы:
+   сначала владелец должен обеспечить отсутствие возможности списаний.
+2. В `.codex/config.toml` изменить `enabled` на `true` только в
+   `[mcp_servers.render]`. Открыть доверенный проект и перезапустить сессию Codex,
+   чтобы загрузить проектную конфигурацию. Railway оставить отключённым.
+3. Из корня проекта выполнить `codex mcp login render` и пройти OAuth в браузере.
+   Публичный идентификатор OAuth-клиента `codex` уже задан в шаблоне и не является
+   секретом. Сессию OAuth хранит клиент Codex вне репозитория;
+   файлы с токенами и ключами в Git не
+   добавлять. Если CLI Codex недоступен, пройти вход через настройки MCP клиента.
+4. Через MCP выбрать нужный workspace и прочитать список сервисов. Тарифы,
+   способ оплаты и лимиты проверить в Render Dashboard: MCP может не отдавать
+   сведения о биллинге. Подключение MCP само по себе не разрешает деплой:
+   создание ресурсов и публикация требуют отдельной задачи с проверкой тарифа.
+
+Инструкции: [Render MCP](https://render.com/docs/mcp-server),
+[Render Free](https://render.com/docs/free),
+[MCP в Codex](https://developers.openai.com/codex/mcp).
+
+Render Free засыпает после 15 минут без входящих запросов; пробуждение занимает
+около минуты. На workspace выделяется 750 бесплатных часов в месяц, также есть
+лимиты трафика и сборок. Без способа оплаты превышение лимитов приводит к
+приостановке сервисов или сборок, а не к покупке дополнительных ресурсов.
+Комментарии в конфигурации MCP не устанавливают финансовые лимиты платформы.
+
+Если Render Free недоступен, резервный шаблон `[mcp_servers.railway]` включается
+по тому же порядку вместо Render; команда входа — `codex mcp login railway`.
+Перед этим проверить доступность Trial/Free без карты и оплаты. Если бесплатного
+варианта нет, остановиться и оставить оба MCP отключёнными.
+
+Инструкции: [Railway MCP](https://docs.railway.com/ai/mcp-server),
+[бесплатные условия Railway](https://docs.railway.com/pricing/free-trial).
+Бесплатный кредит ограничен и не гарантирует непрерывную работу сервиса.
+
+Для повторного деплоя нужен один экземпляр приложения, сборка из корневого
+`Dockerfile`, runtime Docker, порт из `PORT` и проверка `/api/health`.
+Платформа берёт команду запуска контейнера из `Dockerfile`;
+отдельный Start Command не нужен. Данные хранятся в памяти процесса:
+перезапуск, новый деплой или остановка хостингом сбрасывают типы встреч
+и встречи, в том числе при засыпании Render Free. Несколько экземпляров имеют
+независимые данные. Внешняя БД и постоянный диск для этого приложения не нужны.
+
+При приёмке по публичной ссылке создать тип встречи на странице владельца,
+забронировать свободный слот как гость, проверить встречу у владельца и отказ
+повторного или частично пересекающегося бронирования через HTTP. Публичную
+проверку выполнять в рамках одного запуска приложения.
 
 ---
 

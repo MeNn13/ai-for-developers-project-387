@@ -131,7 +131,7 @@ docs: describe local setup
 ### Issue tracker
 
 Задачи и спецификации живут в GitHub Issues репозитория
-`MeNn13/ai-for-developers-project-386`, работа — через CLI `gh`. См.
+`MeNn13/ai-for-developers-project-387`, работа — через CLI `gh`. См.
 `docs/agents/issue-tracker.md`.
 
 ### Triage labels
