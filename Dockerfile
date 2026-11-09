@@ -3,7 +3,7 @@
 # One image serves both the API and the built frontend: Hexlet runs the project
 # as a container, and a single process and a single port make that check simple.
 
-FROM node:24-bookworm-slim AS web
+FROM node:25-bookworm-slim AS web
 
 WORKDIR /src
 
