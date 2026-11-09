@@ -23,8 +23,8 @@
     "@commitlint/cli": "21.2.4",
     "@commitlint/config-conventional": "21.2.4",
     "@playwright/test": "1.65.0",
-    "agnix": "0.59.3",
-    "knip": "6.43.0",
+    "agnix": "0.60.3",
+    "knip": "6.44.1",
     "prettier": "3.9.10",
     "syncpack": "15.3.3"
   }
