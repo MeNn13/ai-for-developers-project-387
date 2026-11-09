@@ -1,0 +1,189 @@
+[settings]
+experimental = true
+
+[tools]
+dotnet = "10.0.403"
+node = "24.22.1"
+pitchfork = "2.32.3"
+hk = "2.9.0"
+jactionlint = "2.3.0"
+shellcheck = "0.11.0"
+betterleaks = "1.9.0"
+osv-scanner = "2.7.0"
+vacuum = "0.35.4"
+rumdl = "0.3.0"
+lychee = "0.24.2"
+hadolint = "2.15.1"
+"github:oasdiff/oasdiff" = "1.34.1"
+
+[env]
+DOTNET_CLI_TELEMETRY_OPTOUT = "1"
+DOTNET_NOLOGO = "1"
+ASPNETCORE_ENVIRONMENT = "Development"
+ASPNETCORE_URLS = "http://127.0.0.1:5000"
+
+[tasks.install]
+depends = ["install:dotnet", "install:web", "install:server"]
+
+[tasks."install:server"]
+run = "npm ci --prefix contract/server --ignore-scripts"
+
+[tasks."install:dotnet"]
+run = "dotnet restore backend/BookingCalendar.sln --locked-mode"
+
+[tasks."install:web"]
+run = "npm ci"
+
+[tasks.generate]
+run = "node scripts/generate.mjs"
+
+[tasks."generate:check"]
+run = "node scripts/generate.mjs --check"
+
+[tasks.lint]
+depends = ["lint:dotnet", "lint:contract", "lint:web", "lint:format", "lint:ci", "lint:docs", "lint:docker", "lint:encoding", "knip", "syncpack", "agent:lint", "contract:lint"]
+
+[tasks."lint:dotnet"]
+run = "dotnet format backend/BookingCalendar.sln --verify-no-changes --no-restore"
+
+[tasks."lint:contract"]
+run = "npm run lint --workspace contract"
+
+[tasks."contract:lint"]
+run = "vacuum lint contract/openapi/openapi.yaml"
+
+[tasks."lint:web"]
+run = "npm run lint --workspace frontend"
+
+[tasks."lint:format"]
+run = "npm run format:check"
+
+[tasks."lint:ci"]
+run = "jactionlint"
+
+[tasks."lint:docs"]
+run = "rumdl check ."
+
+[tasks."lint:docker"]
+run = "hadolint Dockerfile"
+
+[tasks."lint:encoding"]
+run = "node scripts/encoding-check.mjs"
+
+[tasks."test:scripts"]
+env = { MISE_TEST_BIN = "{{mise_bin}}" }
+run = "node --import ./scripts/test-git-environment.mjs --test scripts/*.test.mjs"
+
+[tasks.knip]
+run = "npm run knip"
+
+[tasks.syncpack]
+run = "npm run syncpack"
+
+[tasks."agent:lint"]
+run = "npm run agent:lint"
+
+[tasks."agent:ready"]
+description = "Check formatting and Knip before agent handoff"
+run = [{ task = "lint:format" }, { task = "knip" }]
+
+[tasks."agent:rules"]
+run = "node scripts/agent-rules.mjs --output artifacts/agent-workflow.rules"
+
+[tasks."agent:permissions"]
+run = "node scripts/agent-permissions.mjs"
+
+[tasks."agent:worktree-cleanup"]
+run = "node scripts/agent-worktree-cleanup.mjs"
+
+[tasks.secrets]
+run = "betterleaks dir . --no-banner --redact"
+
+[tasks."check:audit"]
+run = [
+  { task = "audit:vulnerabilities" },
+  { task = "audit:secrets" },
+  { task = "audit:links" },
+]
+
+[tasks."audit:vulnerabilities"]
+run = "osv-scanner scan source --recursive ."
+
+[tasks."audit:secrets"]
+run = "betterleaks git --no-banner --redact"
+
+[tasks."audit:links"]
+run = "lychee --no-progress README.md AGENTS.md contract/README.md .github/workflows/README.md"
+
+[tasks.typecheck]
+run = "npm run typecheck --workspace frontend"
+
+[tasks.fix]
+run = ["npm run format", "dotnet format backend/BookingCalendar.sln --no-restore"]
+
+[tasks.test]
+run = "dotnet test backend/BookingCalendar.sln --no-restore --nologo"
+
+[tasks."test:web"]
+run = "npm test --workspace frontend"
+
+[tasks."test:e2e"]
+depends = ["build"]
+run = "npx playwright test"
+
+[tasks.check]
+run = [
+  { task = "generate:check" },
+  { task = "lint" },
+  { task = "secrets" },
+  { task = "typecheck" },
+  { task = "test:scripts" },
+  { task = "test" },
+  { task = "test:web" },
+  { task = "build" },
+  { task = "test:e2e" },
+]
+
+[tasks.build]
+depends = ["build:dotnet", "build:web"]
+
+[tasks."build:dotnet"]
+run = "dotnet build backend/BookingCalendar.sln -c Release --no-restore --nologo"
+
+[tasks."build:web"]
+run = "npm run build --workspace frontend"
+
+[tasks."publish:api"]
+run = "dotnet publish backend/BookingCalendar.Api/BookingCalendar.Api.csproj --configuration Release --no-restore --output artifacts/publish/api"
+
+[tasks.dev]
+daemons = ["api", "web"]
+run = "echo API: http://127.0.0.1:5000/api/health - Web: http://127.0.0.1:5173"
+
+[tasks."dev:api"]
+run = "dotnet watch --project backend/BookingCalendar.Api run --no-launch-profile"
+
+[tasks."dev:web"]
+run = "npm run dev --workspace frontend"
+
+[tasks."hooks:install"]
+run = "hk install --mise"
+
+[tasks."docker:build"]
+run = "docker build --tag booking-calendar:local ."
+
+[tasks."docker:run"]
+run = "docker run --rm --publish 8080:8080 booking-calendar:local"
+
+[tasks."docker:check"]
+run = "node scripts/image-check.mjs"
+
+[daemons.api]
+task = "dev:api"
+port = 5000
+ready_http = { url = "http://127.0.0.1:5000/api/health", timeout = "120s" }
+
+[daemons.web]
+task = "dev:web"
+port = 5173
+ready_http = { url = "http://127.0.0.1:5173", timeout = "120s" }

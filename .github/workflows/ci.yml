@@ -1,0 +1,150 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      public_acceptance:
+        description: 'Create a test booking on the public Render service'
+        type: boolean
+        default: false
+  schedule:
+    # A new advisory can fail the build without any change on our side.
+    - cron: '17 5 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-worktrees:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          version: '2026.10.12'
+          install_args: node
+      - name: Check worktree cleanup on Windows
+        run: mise exec -- node --test scripts/agent-worktree-cleanup.test.mjs
+
+  public-acceptance:
+    if: github.event_name == 'workflow_dispatch' && inputs.public_acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check public HTTP booking flow
+        run: node scripts/public-acceptance.mjs
+
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          version: '2026.10.12'
+
+      - name: Trust mise config
+        run: mise trust
+
+      - name: Install dependencies
+        run: mise run install
+
+      - name: Install Chromium and system dependencies
+        run: mise exec -- npx playwright install --with-deps chromium
+
+      - name: Check commit messages
+        if: github.event_name == 'pull_request'
+        run: npx commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+      - name: Check commit messages on main
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        run: npx commitlint --from "$BEFORE_SHA" --to "$HEAD_SHA" --verbose
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+
+      - name: Check the contract for breaking changes
+        if: github.event_name == 'pull_request'
+        run: |
+          git show "$BASE_SHA:contract/openapi/openapi.yaml" > "$RUNNER_TEMP/base-openapi.yaml"
+          oasdiff breaking "$RUNNER_TEMP/base-openapi.yaml" contract/openapi/openapi.yaml --fail-on ERR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+      - name: Run checks
+        run: mise run check
+
+      - name: Upload browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-diagnostics
+          path: artifacts/e2e/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The Hexlet requirement says the project must build into an image and run in
+  # a container, so that is checked on every pull request. It is a separate job
+  # because building the image costs minutes and the check job stays fast.
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          version: '2026.10.12'
+
+      - name: Trust mise config
+        run: mise trust
+
+      - name: Build the image and check the container
+        run: mise run docker:check
+
+  # Slow scans that read the network or the whole git history. They do not
+  # need the dependencies installed, and they also run on a schedule.
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          version: '2026.10.12'
+
+      - name: Trust mise config
+        run: mise trust
+
+      - name: Audit dependencies and history
+        run: mise run check:audit

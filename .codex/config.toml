@@ -1,0 +1,19 @@
+# Учебный деплой: разрешены только бесплатные Trial/Free ресурсы.
+# Если бесплатное размещение недоступно, остановиться и отключить этот MCP.
+# Не подключать платный тариф, карту или автоматическое пополнение.
+# Эти комментарии фиксируют правило работы, но не являются лимитом расходов хостинга.
+# Регистрацию и OAuth-вход выполняет владелец аккаунта.
+# Основной вариант: Render Free. Подключение и деплой пока отложены.
+# Документация: https://render.com/docs/mcp-server
+[mcp_servers.render]
+enabled = true
+url = "https://mcp.render.com/mcp"
+
+[mcp_servers.render.oauth]
+client_id = "codex"
+
+# Резерв: Railway, только если аккаунту доступно бесплатное размещение.
+# Документация: https://docs.railway.com/ai/mcp-server
+[mcp_servers.railway]
+enabled = false
+url = "https://mcp.railway.com"

@@ -1,0 +1,32 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+# Workflow-wide default denies everything; the single job below grants exactly
+# what the release action needs. Config and manifest live in the standard
+# repository-root places (release-please-config.json, .release-please-manifest.json),
+# so the action runs without explicit inputs.
+permissions: {}
+
+# Never cancel a running release: two pushes to main in a row must not race
+# for the single release pull request, so the runs queue instead.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    # The action opens and updates a release pull request and tags the merge
+    # commit on main, so this job needs write access to contents and pull requests.
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1

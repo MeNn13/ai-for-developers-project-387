@@ -1,0 +1,16 @@
+# Everything the build produces or reads from the host is rebuilt inside the
+# image, so it is kept out of the build context.
+
+.git
+.github
+.vs
+.idea
+
+node_modules
+**/node_modules
+
+**/bin
+**/obj
+**/dist
+
+.rumdl_cache

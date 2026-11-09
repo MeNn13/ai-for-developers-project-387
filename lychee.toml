@@ -1,0 +1,10 @@
+# lychee configuration. https://lychee.cli.rs/
+
+# Two local addresses in README point at the API and the Vite dev server.
+# The check runs in CI, where neither is running, and the port is not a
+# broken link.
+exclude = ['^http://127\.0\.0\.1', '^http://localhost']
+
+# Pages under the link checkers' own rate limits are retried instead of failed.
+max_retries = 2
+retry_wait_time = 2

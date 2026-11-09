@@ -1,0 +1,25 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignore": [".agents/**"],
+  "workspaces": {
+    "contract/server": {
+      "entry": ["generate.mjs", "patch-emitter.mjs"]
+    },
+    "docs/experiments/server-models": {
+      "entry": ["generate.mjs", "patch-emitter.mjs"]
+    },
+    "frontend": {
+      "project": ["src/**/*.{ts,tsx}"],
+      "ignore": ["src/api/generated/**"]
+    },
+    "contract": {
+      "ignoreDependencies": [
+        "@typespec/http",
+        "@typespec/json-schema",
+        "@typespec/openapi",
+        "@typespec/openapi3",
+        "@typespec/rest"
+      ]
+    }
+  }
+}

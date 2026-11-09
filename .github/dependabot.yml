@@ -1,0 +1,65 @@
+version: 2
+
+# A cooldown delays a freshly published version, which limits exposure to a
+# compromised release. jactionlint checks that every update sets one.
+#
+# Dependabot pull requests run without repository secrets, so the Hexlet-owned
+# check in .github/workflows/hexlet-check.yml fails there with "Input required
+# and not supplied: hexlet-id". That failure is expected and says nothing about
+# the update; the ci workflow is the gate.
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # The types must describe the Node major pinned in mise.toml, otherwise
+      # the compiler accepts calls the runtime does not have. Lift this entry
+      # together with the Node upgrade.
+      - dependency-name: '@types/node'
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: nuget
+    directories:
+      - /backend/BookingCalendar.Api
+      - /backend/BookingCalendar.Api.Tests
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      nuget-minor-and-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

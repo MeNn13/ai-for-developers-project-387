@@ -1,0 +1,21 @@
+# jactionlint configuration. https://jactionlint.jdx.dev/configuration
+#
+# Without arguments jactionlint checks this whole repository: the workflows,
+# the Dependabot configuration and the composite actions.
+
+self-hosted-runner:
+  labels: []
+
+config-variables: null
+config-secrets: null
+
+# Durable exceptions. An entry stops ignoring after "expires" and the
+# expired-ignore rule reports it, so an exception cannot outlive its reason.
+ignores:
+  - rule: artipacked
+    uses: actions/checkout
+    file: .github/workflows/hexlet-check.yml
+    reason: >-
+      Hexlet installs and owns this workflow and forbids editing it, so
+      persist-credentials: false cannot be added there.
+    expires: '2027-01-31'

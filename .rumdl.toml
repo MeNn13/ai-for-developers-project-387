@@ -1,0 +1,17 @@
+# rumdl configuration. https://rumdl.dev/configuration/
+
+[global]
+# Prettier owns the layout of Markdown, so the line-length rule fights it and
+# Russian prose would be rewrapped by hand. MD033 is off because README uses a
+# <details> block on purpose.
+disable = ["MD013", "MD033"]
+
+exclude = [
+    ".git",
+    "node_modules",
+    "dist",
+    ".agents",
+    "contract/openapi",
+    # Written by the release-please bot on every release, never edited by hand.
+    "CHANGELOG.md",
+]

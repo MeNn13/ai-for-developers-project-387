@@ -1,0 +1,15 @@
+# Every text file is stored with LF line endings and checked out with LF, so
+# that Prettier and the generated-code check behave the same on Windows, macOS
+# and CI. .editorconfig already asks for LF; without this file, git's
+# core.autocrlf setting rewrites the working tree to CRLF on Windows and the
+# formatting check fails on a clean checkout.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary

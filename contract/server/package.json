@@ -1,0 +1,14 @@
+{
+  "name": "booking-calendar-server-generation",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@typespec/compiler": "1.17.0",
+    "@typespec/http": "1.17.0",
+    "@typespec/http-server-csharp": "0.58.0-alpha.32",
+    "@typespec/json-schema": "1.17.0",
+    "@typespec/openapi": "1.17.0",
+    "@typespec/rest": "0.86.0",
+    "@typespec/versioning": "0.86.0"
+  }
+}

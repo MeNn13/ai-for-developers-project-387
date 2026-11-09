@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: booking-calendar
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: off

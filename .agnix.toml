@@ -1,0 +1,4 @@
+# .agents holds skill definitions installed from an external source, not authored
+# in this repository. They are kept as-is, so only the project's own agent docs
+# are validated.
+exclude = [".agents/**"]
