@@ -12,6 +12,14 @@ config-secrets: null
 # Durable exceptions. An entry stops ignoring after "expires" and the
 # expired-ignore rule reports it, so an exception cannot outlive its reason.
 ignores:
+  - rule: dangerous-triggers
+    file: .github/workflows/opencode.yml
+    reason: >-
+      Approved by the repository owner on 2026-11-10 for the lesson's
+      issue_comment scenario. Only allowlisted trusted humans reach the model;
+      fork PRs are rejected, only default-branch code runs, and GitHub write
+      permissions are isolated from the model in a separate job.
+    expires: '2027-01-31'
   - rule: artipacked
     uses: actions/checkout
     file: .github/workflows/hexlet-check.yml
