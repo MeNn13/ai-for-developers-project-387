@@ -2,8 +2,8 @@ import { appendFile, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { resolve, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { trustedHuman, validateReply } from './opencode-publish.mjs'
 
-const allowedUsers = ['MeNn13']
 const model = 'opencode/glm-5.3-flash-free'
 
 // Only deliberate internal diagnostics may be printed in public logs.
@@ -23,8 +23,7 @@ export async function prepare(eventName, event, api) {
   if (
     !['issue_comment', 'pull_request_review_comment'].includes(eventName) ||
     event.action !== 'created' ||
-    event.comment?.user?.type !== 'User' ||
-    !allowedUsers.includes(event.comment.user.login) ||
+    !trustedHuman(event.comment ?? {}) ||
     !/^\s*\/(?:oc|opencode)(?=\s|$)/i.test(event.comment.body ?? '')
   )
     return null
@@ -44,11 +43,15 @@ export async function prepare(eventName, event, api) {
   )
   const context = {
     number,
+    repository: event.repository.full_name,
+    requestId: event.comment.id,
     checkout: process.env.CHECKOUT_SHA,
     title: issue.title,
     body: issue.body,
+    labels: issue.labels,
     comments: earlier,
   }
+  if (!isPr) context.related = await relatedIssues(context, event.repository.full_name, api)
   if (pr) {
     context.pr = { base: pr.base.sha, head: pr.head.sha }
     context.diff = await api(`/pulls/${number}`, 'application/vnd.github.diff')
@@ -73,6 +76,52 @@ export async function prepare(eventName, event, api) {
   return { number, context: serialized }
 }
 
+async function relatedIssues(source, repository, api) {
+  const seen = new Set([source.number])
+  const related = []
+  let frontier = [source]
+  for (let depth = 0; depth < 2; depth++) {
+    const next = []
+    for (const issue of frontier) {
+      const text = [issue.body, ...issue.comments.map((comment) => comment.body)].join('\n')
+      // Remove foreign URLs before matching bare #number references.
+      const local = text.replace(/https?:\/\/[^\s)<>]+/g, (url) => {
+        const match = url.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)/)
+        return match?.[1] === repository ? ` #${match[2]} ` : ''
+      })
+      for (const match of local.matchAll(/(?:^|[^\w/])#([1-9]\d*)\b/g)) {
+        const number = Number(match[1])
+        if (!Number.isSafeInteger(number) || seen.has(number)) continue
+        seen.add(number)
+        if (seen.size > 31)
+          throw new WorkflowError('Too many linked issues; narrow the discussion.')
+        let linked
+        let comments
+        try {
+          linked = await api(`/issues/${number}`)
+          comments = await pages(api, `/issues/${number}/comments`)
+        } catch (error) {
+          if (![403, 404, 410].includes(error.status)) throw error
+          related.push({ number, unavailable: true })
+          continue
+        }
+        const entry = {
+          number,
+          title: linked.title,
+          body: linked.body,
+          labels: linked.labels,
+          comments,
+          pr: Boolean(linked.pull_request),
+        }
+        related.push(entry)
+        next.push(entry)
+      }
+    }
+    frontier = next
+  }
+  return related
+}
+
 async function github(path, accept = 'application/vnd.github+json') {
   const response = await fetch(
     `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}${path}`,
@@ -81,11 +130,14 @@ async function github(path, accept = 'application/vnd.github+json') {
       signal: AbortSignal.timeout(30_000),
     },
   )
-  if (!response.ok) throw new WorkflowError(`GitHub returned ${response.status}.`)
+  if (!response.ok)
+    throw Object.assign(new WorkflowError(`GitHub returned ${response.status}.`), {
+      status: response.status,
+    })
   return accept === 'application/vnd.github.diff' ? response.text() : response.json()
 }
 
-export function resultComments(stream, runUrl) {
+function resultText(stream) {
   let message
   let text = ''
   let finished = false
@@ -106,14 +158,13 @@ export function resultComments(stream, runUrl) {
     if (event.type === 'step_finish') finished = event.part.reason === 'stop'
   }
   if (!finished || !text.trim()) throw new WorkflowError('No completed model answer.')
-  const comments = []
-  // Leave room for the attribution and run URL below GitHub's comment limit.
-  for (let start = 0; start < text.length; start += 50_000) {
-    comments.push(
-      `OpenCode · ${model}\n\n${text.slice(start, start + 50_000)}\n\n[Actions](${runUrl})`,
-    )
-  }
-  return comments
+  return text
+}
+
+export function resultReply(stream) {
+  const reply = JSON.parse(resultText(stream))
+  validateReply(reply)
+  return reply
 }
 
 async function run(directory) {
@@ -154,9 +205,8 @@ async function run(directory) {
   })
   if (status !== 0 || bytes > 2_000_000)
     throw new WorkflowError('OpenCode CLI failed. Check provider key, availability and limits.')
-  const runUrl = `https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
-  const comments = resultComments(stream, runUrl)
-  await writeFile(join(directory, 'reply.json'), JSON.stringify(comments))
+  const reply = resultReply(stream)
+  await writeFile(join(directory, 'reply.json'), JSON.stringify(reply))
 }
 
 async function main() {

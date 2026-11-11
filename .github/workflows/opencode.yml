@@ -80,7 +80,7 @@ jobs:
           echo "$RUNNER_TEMP/opencode-bin" >> "$GITHUB_PATH"
           sudo mkdir -p /etc/opencode
           jq '.update = "disable"' .github/opencode/opencode.json | sudo tee /etc/opencode/opencode.json > /dev/null
-      - name: Explain discussion
+      - name: Prepare discussion or publication
         run: node scripts/opencode.mjs run
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
@@ -96,10 +96,22 @@ jobs:
     if: always() && needs.context.outputs.allowed == 'true' && needs.answer.result != 'cancelled'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    concurrency:
+      group: opencode-publish-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
     permissions:
+      contents: read
       issues: write
       pull-requests: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.context.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: opencode-context
+          path: ${{ runner.temp }}/opencode-context
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: needs.answer.result == 'success'
         with:
@@ -114,14 +126,23 @@ jobs:
             const fs = require('node:fs/promises');
             const path = require('node:path');
             const run = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const replies = process.env.ANSWER_RESULT === 'success'
-              ? JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-reply', 'reply.json'), 'utf8'))
-              : [`OpenCode не смог подготовить ответ. Проверьте секрет OPENCODE_API_KEY, доступность бесплатной модели и лимиты провайдера. [Прогон Actions](${run})`];
-            if (!Array.isArray(replies) || !replies.length || replies.length > 40 ||
-                replies.some(body => typeof body !== 'string' || !body.trim() || body.length > 60000)) {
-              throw new Error('Invalid OpenCode reply');
-            }
             const issue_number = context.payload.issue?.number ?? context.payload.pull_request.number;
-            for (const body of replies) {
-              await github.rest.issues.createComment({ ...context.repo, issue_number, body });
+            try {
+              if (process.env.ANSWER_RESULT !== 'success') throw new Error('Model job failed');
+              const prepared = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-context', 'context.json'), 'utf8'));
+              if (prepared.number !== issue_number || prepared.requestId !== context.payload.comment.id ||
+                  prepared.repository !== `${context.repo.owner}/${context.repo.repo}`) throw new Error('Context mismatch');
+              const reply = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-reply', 'reply.json'), 'utf8'));
+              const { pathToFileURL } = require('node:url');
+              const { publish } = await import(pathToFileURL(path.resolve('scripts/opencode-publish.mjs')).href);
+              const api = async (method, route, data = {}) => {
+                const response = await github.request(`${method} /repos/{owner}/{repo}${route}`, { ...context.repo, ...data });
+                return response.data;
+              };
+              await publish(reply, prepared, api, run);
+            } catch (error) {
+              if (error.message?.startsWith('Invalid OpenCode publication:')) core.error(error.message);
+              await github.rest.issues.createComment({ ...context.repo, issue_number,
+                body: `OpenCode не завершил подготовку или публикацию. Проверьте прогон, OPENCODE_API_KEY, лимиты модели и права GitHub. При частичной публикации повторите этот прогон с исходным артефактом; созданные issues сохраняются. [Actions](${run})` });
+              core.setFailed('OpenCode preparation or publication failed.');
             }
