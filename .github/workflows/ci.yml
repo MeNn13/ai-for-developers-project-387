@@ -68,8 +68,25 @@ jobs:
       - name: Install dependencies
         run: mise run install
 
+      - name: Configure Ubuntu apt mirrors and network limits
+        run: |
+          # Hosted runners can use a mirror list rather than a direct source URL.
+          sudo grep -R -n -E 'azure.archive.ubuntu.com|apt-mirrors.txt' /etc/apt/sources.list /etc/apt/sources.list.d /etc/apt/apt-mirrors.txt 2>/dev/null || true
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo cat /etc/apt/apt-mirrors.txt
+            echo 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt
+          fi
+          for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            if [ -f "$source" ]; then
+              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g; s|https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$source"
+              sudo cat "$source"
+            fi
+          done
+          printf '%s\n' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' 'Acquire::Retries "2";' | sudo tee /etc/apt/apt.conf.d/99-ci-network
+
       - name: Install Chromium and system dependencies
-        run: mise exec -- npx playwright install --with-deps chromium
+        timeout-minutes: 6
+        run: mise exec -- npx playwright install --with-deps --only-shell chromium
 
       - name: Check commit messages
         if: github.event_name == 'pull_request'

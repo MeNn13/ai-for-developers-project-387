@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { prepare, resultComments } from './opencode.mjs'
+import { prepare, resultReply } from './opencode.mjs'
 
 function event(body = '/oc explain this issue') {
   return {
@@ -57,20 +57,19 @@ test('rejects fork pull requests before fetching comments or diff', async () => 
   )
 })
 
-test('JSON stream publishes only the final assistant message, split into bounded comments', () => {
+test('JSON stream returns only the final assistant message', () => {
   const stream = [
     { type: 'text', part: { messageID: 'first', text: 'Reading files' } },
     { type: 'step_finish', part: { reason: 'tool-calls' } },
-    { type: 'text', part: { messageID: 'last', text: 'Answer '.repeat(12_000) } },
+    {
+      type: 'text',
+      part: { messageID: 'last', text: JSON.stringify({ version: 1, comment: 'Answer' }) },
+    },
     { type: 'step_finish', part: { reason: 'stop' } },
   ]
     .map(JSON.stringify)
     .join('\n')
-  const comments = resultComments(stream, 'https://example.com/run')
-  assert.equal(comments.length, 2)
-  assert.ok(comments.every((comment) => comment.length <= 60_000))
-  assert.ok(comments.every((comment) => comment.includes('https://example.com/run')))
-  assert.ok(comments.every((comment) => !comment.includes('Reading files')))
+  assert.deepEqual(resultReply(stream), { version: 1, comment: 'Answer' })
 })
 
 test('errors, invalid JSON, missing completion and empty answers are not published as success', () => {
@@ -80,7 +79,7 @@ test('errors, invalid JSON, missing completion and empty answers are not publish
     '{"type":"error","error":{"message":"401"}}',
     '{"type":"text","part":{"text":"unfinished"}}',
   ]) {
-    assert.throws(() => resultComments(stream, 'https://example.com/run'))
+    assert.throws(() => resultReply(stream))
   }
 })
 
@@ -149,4 +148,54 @@ test('CLI reports a missing provider key without invoking the model', () => {
   assert.equal(result.status, 1)
   assert.match(result.stderr, /OPENCODE_API_KEY is missing/)
   assert.equal(result.stdout, '')
+})
+
+test('linked specification and tickets include their discussions; foreign references are not fetched', async () => {
+  const result = await prepare(
+    'issue_comment',
+    event('/oc apply to-tickets to #20'),
+    async (path) => {
+      if (path === '/issues/12')
+        return { title: 'Source', body: 'https://github.com/other/repo/issues/99' }
+      if (path.startsWith('/issues/12/comments?'))
+        return [event('/oc apply to-tickets to #20').comment]
+      if (path === '/issues/20') return { title: 'Spec', body: 'Ticket #21' }
+      if (path.startsWith('/issues/20/comments?')) return [{ id: 30, body: 'Testing agreed' }]
+      if (path === '/issues/21') return { title: 'Ticket', body: 'Acceptance criteria' }
+      if (path.startsWith('/issues/21/comments?')) return []
+      assert.fail(`Unexpected ${path}`)
+    },
+  )
+  const context = JSON.parse(result.context)
+  assert.equal(context.requestId, 40)
+  assert.equal(context.repository, event().repository.full_name)
+  assert.deepEqual(
+    context.related.map((issue) => issue.number),
+    [20, 21],
+  )
+  assert.match(result.context, /Testing agreed|Acceptance criteria/)
+})
+
+test('final structured result is validated, while tool text and unfinished JSON cannot authorize publication', () => {
+  const stream = (text, reason = 'stop') =>
+    [
+      { type: 'text', part: { messageID: 'last', text } },
+      { type: 'step_finish', part: { reason } },
+    ]
+      .map(JSON.stringify)
+      .join('\n')
+  const reply = { version: 1, comment: 'Вопросы', publication: null }
+  assert.deepEqual(resultReply(stream(JSON.stringify(reply))), reply)
+  assert.throws(() => resultReply(stream('not json')))
+  assert.throws(() => resultReply(stream('{"version":1}')))
+  assert.throws(() => resultReply(stream(JSON.stringify(reply), 'tool-calls')))
+})
+
+test('a deleted linked issue is reported in context without breaking ordinary discussion', async () => {
+  const result = await prepare('issue_comment', event('/oc explain #999'), async (path) => {
+    if (path === '/issues/12') return { title: 'Source' }
+    if (path.startsWith('/issues/12/comments?')) return [event('/oc explain #999').comment]
+    throw Object.assign(new Error('GitHub returned 404.'), { status: 404 })
+  })
+  assert.deepEqual(JSON.parse(result.context).related, [{ number: 999, unavailable: true }])
 })
