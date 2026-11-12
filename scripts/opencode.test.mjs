@@ -28,6 +28,12 @@ test('workflow failure notice posts only a safe comment for missing, invalid and
       null,
       'not JSON fake-secret',
       JSON.stringify({ version: 1, code: 'reply_json', stage: 'reply' }),
+      JSON.stringify({
+        version: 2,
+        code: 'reply_schema',
+        stage: 'reply',
+        details: { rule: 'item_key' },
+      }),
     ]) {
       const file = join(directory, 'opencode-diagnostic', 'diagnostic.json')
       if (value === null) await rm(file, { force: true })
@@ -97,6 +103,97 @@ function answerStream(text, reason = 'stop') {
     .map(JSON.stringify)
     .join('\n')
 }
+
+test('schema failure reports a fixed rule without retaining model data', () => {
+  assert.throws(
+    () => resultReply(answerStream('{"comment":"fake-secret"}')),
+    (error) => {
+      assert.deepEqual(diagnosticFor(error), {
+        version: 2,
+        code: 'reply_schema',
+        stage: 'reply',
+        details: { rule: 'version_comment' },
+      })
+      assert.doesNotMatch(JSON.stringify(error), /fake-secret/)
+      return true
+    },
+  )
+})
+
+test('schema rules identify the first failed validation and preserve valid replies', () => {
+  const item = { key: 'task', title: 'Title', body: 'Body', blockedBy: [] }
+  const spec = (items) => ({ version: 1, comment: 'Answer', publication: { kind: 'spec', items } })
+  const cases = [
+    [null, 'version_comment'],
+    [{ version: 1, comment: 'Answer', publication: { kind: 'fake-secret' } }, 'publication_kind'],
+    [spec([]), 'publication_items'],
+    [spec([item, item]), 'spec_item_count'],
+    [
+      { version: 1, comment: 'Answer', publication: { kind: 'tickets', items: [item] } },
+      'ticket_references',
+    ],
+    [spec([{ ...item, key: 'fake secret' }]), 'item_key'],
+    [spec([{ ...item, title: '' }]), 'item_text'],
+    [spec([{ ...item, blockedBy: null }]), 'item_blockers'],
+    [spec([{ ...item, blockedBy: ['fake-secret'] }]), 'blocker_order'],
+    [spec([null]), 'schema_other'],
+  ]
+  for (const [reply, rule] of cases) {
+    assert.throws(
+      () => resultReply(answerStream(JSON.stringify(reply))),
+      (error) => {
+        assert.deepEqual(diagnosticFor(error), {
+          version: 2,
+          code: 'reply_schema',
+          stage: 'reply',
+          details: { rule },
+        })
+        assert.doesNotMatch(JSON.stringify(error), /fake-secret/)
+        return true
+      },
+    )
+  }
+  for (const reply of [
+    spec([item]),
+    { version: 1, comment: 'Answer' },
+    {
+      version: 1,
+      comment: 'Answer',
+      publication: { kind: 'tickets', spec: 12, approvalComment: 40, items: [item] },
+    },
+  ])
+    assert.deepEqual(resultReply(answerStream(JSON.stringify(reply))), reply)
+})
+
+test('schema diagnostic allowlist rejects arbitrary data and retains v1 compatibility', () => {
+  const diagnostic = {
+    version: 2,
+    code: 'reply_schema',
+    stage: 'reply',
+    details: { rule: 'item_key' },
+  }
+  for (const value of [diagnostic, { version: 1, code: 'reply_schema', stage: 'reply' }]) {
+    assert.match(failureNotice(value, 'run'), /opencode-diagnostic/)
+    assert.doesNotMatch(failureNotice(value, 'run'), /item_key|частичной/)
+  }
+  for (const value of [
+    { ...diagnostic, details: null },
+    { ...diagnostic, details: [] },
+    { ...diagnostic, details: { rule: 'fake-secret' } },
+    { ...diagnostic, details: { rule: 3 } },
+    { ...diagnostic, details: { rule: { toString: null } } },
+    { ...diagnostic, details: { rule: 'item_key', extra: 'fake-secret' } },
+    { ...diagnostic, extra: 'fake-secret' },
+    { ...diagnostic, stage: 'stream' },
+    { ...diagnostic, code: 'configuration' },
+  ]) {
+    const error = new DiagnosticError('reply_schema')
+    error.diagnostic = value
+    assert.deepEqual(diagnosticFor(error), { version: 1, code: 'unknown', stage: 'unknown' })
+    assert.match(failureNotice(value, 'run'), /При частичной публикации/)
+    assert.doesNotMatch(failureNotice(value, 'run'), /fake-secret/)
+  }
+})
 
 test('JSON failure reports bounded v2 metadata and fixed parse categories', () => {
   for (const [text, kind, position] of [
@@ -342,7 +439,12 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
         const diagnostic = await readFile(join(directory, 'diagnostic.json'), 'utf8')
         assert.equal(JSON.parse(diagnostic).code, code)
         assert.ok(Buffer.byteLength(diagnostic) <= 1024)
-        assert.equal(JSON.parse(diagnostic).version, code === 'reply_json' ? 2 : 1)
+        assert.equal(
+          JSON.parse(diagnostic).version,
+          ['reply_json', 'reply_schema'].includes(code) ? 2 : 1,
+        )
+        if (code === 'reply_schema')
+          assert.equal(JSON.parse(diagnostic).details.rule, 'version_comment')
         assert.doesNotMatch(
           diagnostic + failureNotice(JSON.parse(diagnostic), 'run'),
           /fake-key-private-context/,

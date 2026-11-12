@@ -19,7 +19,7 @@ export class DiagnosticError extends Error {
   constructor(code, details) {
     super(code)
     this.diagnostic = { version: 1, code, stage: categories[code][0] }
-    if (code === 'reply_json' && details !== undefined)
+    if (['reply_json', 'reply_schema'].includes(code) && details !== undefined)
       this.diagnostic = { version: 2, code, stage: 'reply', details }
   }
 }
@@ -52,13 +52,26 @@ function validDiagnostic(value) {
   )
     return false
   if (value.version === 1) return exactKeys(value, 'version,code,stage')
-  if (
-    value.version !== 2 ||
-    value.code !== 'reply_json' ||
-    !exactKeys(value, 'version,code,stage,details')
-  )
-    return false
+  if (value.version !== 2 || !exactKeys(value, 'version,code,stage,details')) return false
   const details = value.details
+  if (value.code === 'reply_schema')
+    return (
+      exactKeys(details, 'rule') &&
+      [
+        'version_comment',
+        'publication_kind',
+        'publication_items',
+        'spec_item_count',
+        'ticket_references',
+        'item_key',
+        'item_text',
+        'item_blockers',
+        'blocker_order',
+        'spec_blockers',
+        'schema_other',
+      ].includes(details.rule)
+    )
+  if (value.code !== 'reply_json') return false
   const counts = [
     'streamBytes',
     'eventCount',
@@ -89,6 +102,8 @@ export function failureNotice(diagnostic, run) {
   const code = validDiagnostic(diagnostic) ? diagnostic.code : 'unknown'
   if (code === 'reply_json')
     return `Не удалось разобрать итоговый ответ модели как JSON. Публикация не начиналась. Код reply_json; безопасные сведения — в артефакте opencode-diagnostic. Передайте ссылку на прогон для диагностики. [Actions](${run})`
+  if (code === 'reply_schema')
+    return `Итоговый ответ модели не соответствует схеме публикации. Публикация не начиналась. Код reply_schema; безопасные сведения — в артефакте opencode-diagnostic. Передайте ссылку на прогон для диагностики. [Actions](${run})`
   if (code !== 'unknown')
     return `${categories[code][1]} Публикация не начиналась. [Actions](${run})`
   return `${categories[code][1]} При частичной публикации повторите прогон с исходным артефактом; созданные issues сохраняются. [Actions](${run})`
