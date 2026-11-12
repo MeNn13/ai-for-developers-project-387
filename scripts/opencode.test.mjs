@@ -135,6 +135,9 @@ test('schema rules identify the first failed validation and preserve valid repli
     [spec([{ ...item, key: 'fake secret' }]), 'item_key'],
     [spec([{ ...item, title: '' }]), 'item_text'],
     [spec([{ ...item, blockedBy: null }]), 'item_blockers'],
+    [spec([{ key: 'task', title: 'Title', body: 'Body' }]), 'item_blockers'],
+    [spec([{ ...item, blockedBy: 'task' }]), 'item_blockers'],
+    [spec([{ ...item, blockedBy: ['task', 'task'] }]), 'item_blockers'],
     [spec([{ ...item, blockedBy: ['fake-secret'] }]), 'blocker_order'],
     [spec([null]), 'schema_other'],
   ]

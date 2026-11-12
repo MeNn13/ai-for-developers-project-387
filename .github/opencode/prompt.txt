@@ -34,6 +34,11 @@ For a specification, publication is:
 {"kind":"spec","items":[{"key":"spec","title":"...","body":"Full spec following skill template","blockedBy":[]}]}
 For approved tickets, publication is:
 {"kind":"tickets","spec":123,"approvalComment":456,"items":[{"key":"first","title":"...","body":"Full ticket following skill template","blockedBy":[]},{"key":"second","title":"...","body":"...","blockedBy":["first"]}]}
+Every publication.items element MUST include blockedBy as an array, even when empty.
+For an item without dependencies, write "blockedBy":[]; never omit it or use null.
+For tickets, blockedBy contains unique string keys of items listed BEFORE that item.
+Do not repeat keys, reference the item itself, or reference later items.
+For a specification, always write "blockedBy":[].
 The spec number must occur in supplied issue context (current issue or related).
 Related issues marked unavailable could not be read; say so and ask for clarification
 if they are needed. Never invent their contents or use them as a specification target.
