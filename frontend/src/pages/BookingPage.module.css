@@ -1,0 +1,6 @@
+@media (max-width: 61.99em) {
+  .confirmationText {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+}

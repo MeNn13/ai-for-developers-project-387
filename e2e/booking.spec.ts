@@ -259,6 +259,46 @@ test('owner creates a meeting type and sees the guest booking', async ({ page })
   await expect(meeting).toHaveCount(1)
 })
 
+test('mobile guest reads an overlap refusal and can recover', async ({ page, context }) => {
+  await page.setViewportSize({ width: 360, height: 640 })
+  await page.goto('/owner')
+  await page.getByLabel('Название', { exact: true }).fill('Mobile overlap')
+  await page.getByRole('button', { name: 'Создать', exact: true }).click()
+  await expect(page.getByText('Тип встречи создан', { exact: true })).toBeVisible()
+  const other = await context.newPage()
+  await other.setViewportSize({ width: 360, height: 640 })
+  for (const tab of [page, other]) {
+    await tab.goto('/book')
+    await tab.getByRole('button', { name: /Mobile overlap/ }).click()
+    await selectLastWorkingDay(tab)
+    await tab
+      .getByRole('button', { name: /^\d{2}:\d{2}–\d{2}:\d{2}$/ })
+      .first()
+      .click()
+    await tab.getByLabel('Ваше имя').fill('Mobile overlap guest')
+  }
+  await page.getByRole('button', { name: 'Продолжить', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Встреча забронирована' })).toBeVisible()
+  const response = other.waitForResponse(
+    (reply) => reply.url().endsWith('/api/meetings') && reply.request().method() === 'POST',
+  )
+  await other.getByRole('button', { name: 'Продолжить', exact: true }).click()
+  expect((await response).status()).toBe(409)
+  const refusal = other.getByText('Это время только что заняли. Выберите другое время.')
+  await refusal.scrollIntoViewIfNeeded()
+  await expect(refusal).toBeInViewport({ ratio: 1 })
+  expect(await refusal.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  expect(await other.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await expect(other.getByRole('status', { name: 'Загрузка слотов' })).toHaveCount(0)
+  await other
+    .getByRole('button', { name: /^\d{2}:\d{2}–\d{2}:\d{2}$/ })
+    .first()
+    .click()
+  await expect(refusal).toHaveCount(0)
+  await other.getByRole('button', { name: 'Продолжить', exact: true }).click()
+  await expect(other.getByRole('heading', { name: 'Встреча забронирована' })).toBeVisible()
+})
+
 test('mobile guest reads an exhausted booking window', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 640 })
   await page.goto('/owner')

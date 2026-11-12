@@ -22,6 +22,7 @@ import { createMeeting, listMeetingTypes, listSlots } from '../api/generated/boo
 import type { Meeting, MeetingType, Slot, SlotDay, SlotsResponse } from '../api/generated/booking'
 import { formatMeetingConfirmation, formatTimeOfDay, formatTimeRange } from '../lib/moscowTime'
 import { isProblemDetails } from '../lib/problemDetails'
+import classes from './BookingPage.module.css'
 
 type TypesState =
   { status: 'loading' } | { status: 'error' } | { status: 'ready'; types: MeetingType[] }
@@ -313,7 +314,7 @@ export function BookingPage() {
           <Paper withBorder p="md">
             <Stack gap="sm" align="flex-start">
               <Title order={2}>Встреча забронирована</Title>
-              <Text fw={600} maw="100%" style={{ overflowWrap: 'anywhere' }}>
+              <Text fw={600} className={classes.confirmationText}>
                 {confirmation.meetingTypeTitle}
               </Text>
               <Text>
@@ -323,9 +324,7 @@ export function BookingPage() {
                   timeZone ?? 'Europe/Moscow',
                 )}
               </Text>
-              <Text maw="100%" style={{ overflowWrap: 'anywhere' }}>
-                {confirmation.guestName}
-              </Text>
+              <Text className={classes.confirmationText}>{confirmation.guestName}</Text>
               <Button onClick={bookAgain}>Записаться ещё</Button>
             </Stack>
           </Paper>
