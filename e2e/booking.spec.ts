@@ -18,6 +18,13 @@ async function selectLastWorkingDay(page: Page) {
   throw new Error('No working day in the booking window')
 }
 
+test('mobile owner reads the empty calendar', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 })
+  await page.goto('/owner')
+  await expect(page.getByText('Предстоящих встреч нет', { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
 test('mobile guest keeps selected time and booking controls in view', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 640 })
   await page.goto('/owner')
@@ -27,6 +34,14 @@ test('mobile guest keeps selected time and booking controls in view', async ({ p
   await page.goto('/book')
   await page.getByRole('button', { name: /Mobile consultation/ }).click()
   await selectLastWorkingDay(page)
+  const lastSlot = page.getByRole('button', { name: /^\d{2}:\d{2}–\d{2}:\d{2}$/ }).last()
+  await lastSlot.click()
+  await expect(lastSlot).toBeInViewport({ ratio: 1 })
+  await expect(page.getByRole('button', { name: 'Продолжить', exact: true })).toBeInViewport({
+    ratio: 1,
+  })
+  await page.getByRole('button', { name: 'Назад', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Продолжить', exact: true })).toBeDisabled()
   const slot = page.getByRole('button', { name: /^\d{2}:\d{2}–\d{2}:\d{2}$/ }).first()
   await slot.click()
   await expect(page.getByLabel('Ваше имя')).toBeFocused()
@@ -42,6 +57,36 @@ test('mobile guest keeps selected time and booking controls in view', async ({ p
   await page.getByLabel('Ваше имя').fill('Mobile Guest')
   await page.getByRole('button', { name: 'Продолжить', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Встреча забронирована' })).toBeVisible()
+  await page.goto('/owner')
+  const meeting = page.getByRole('article').filter({ hasText: 'Mobile Guest' })
+  await expect(meeting).toContainText('Mobile consultation')
+  await expect(meeting).toContainText('30 мин')
+  await expect(meeting).toContainText('Когда')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+test('mobile owner can read loading and error states', async ({ page, context }) => {
+  await page.setViewportSize({ width: 360, height: 640 })
+  let release: (() => void) | undefined
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route('**/api/meetings', async (route) => {
+    await held
+    await route.continue()
+  })
+  await page.goto('/owner')
+  await expect(page.getByRole('status', { name: 'Загрузка предстоящих встреч' })).toBeVisible()
+  release?.()
+  await expect(page.getByRole('status', { name: 'Загрузка предстоящих встреч' })).toHaveCount(0)
+  await context.setOffline(true)
+  await page.getByRole('button', { name: 'Обновить', exact: true }).click()
+  await expect(page.getByText('Не удалось загрузить предстоящие встречи')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Повторить', exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await context.setOffline(false)
+  await page.getByRole('button', { name: 'Повторить', exact: true }).click()
+  await expect(page.getByText('Не удалось загрузить предстоящие встречи')).toHaveCount(0)
 })
 
 test('guest recovers from an overlapping booking in another tab', async ({ page, context }) => {

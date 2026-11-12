@@ -1,6 +1,7 @@
 import {
   Alert,
   Button,
+  Card,
   Container,
   Group,
   List,
@@ -14,6 +15,7 @@ import {
   Textarea,
   Title,
 } from '@mantine/core'
+import { useMediaQuery } from '@mantine/hooks'
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createMeetingType, listMeetingTypes, listMeetings } from '../api/generated/booking'
@@ -118,6 +120,7 @@ async function fetchMeetings(): Promise<Meeting[] | null> {
 }
 
 export function OwnerPage() {
+  const mobile = useMediaQuery('(max-width: 61.99em)')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [duration, setDuration] = useState<number | string>(DURATION_DEFAULT_MINUTES)
@@ -492,26 +495,69 @@ export function OwnerPage() {
             )}
 
             {meetingsState.meetings.length > 0 && (
-              <Table striped withTableBorder>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Когда</Table.Th>
-                    <Table.Th>Тип встречи</Table.Th>
-                    <Table.Th>Длительность</Table.Th>
-                    <Table.Th>Гость</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {meetingsState.meetings.map((meeting) => (
-                    <Table.Tr key={meeting.id}>
-                      <Table.Td>{formatMeetingWhen(meeting.start, meeting.end)}</Table.Td>
-                      <Table.Td>{meeting.meetingTypeTitle}</Table.Td>
-                      <Table.Td>{meeting.durationMinutes} мин</Table.Td>
-                      <Table.Td>{meeting.guestName}</Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
+              <>
+                {mobile ? (
+                  <Stack hiddenFrom="md" gap="sm">
+                    {meetingsState.meetings.map((meeting) => (
+                      <Card
+                        component="article"
+                        key={meeting.id}
+                        withBorder
+                        p="md"
+                        style={{ overflowWrap: 'anywhere' }}
+                      >
+                        <Stack gap="xs">
+                          <Text>
+                            <Text span fw={600}>
+                              Когда:{' '}
+                            </Text>
+                            {formatMeetingWhen(meeting.start, meeting.end)}
+                          </Text>
+                          <Text>
+                            <Text span fw={600}>
+                              Тип встречи:{' '}
+                            </Text>
+                            {meeting.meetingTypeTitle}
+                          </Text>
+                          <Text>
+                            <Text span fw={600}>
+                              Длительность:{' '}
+                            </Text>
+                            {meeting.durationMinutes} мин
+                          </Text>
+                          <Text>
+                            <Text span fw={600}>
+                              Гость:{' '}
+                            </Text>
+                            {meeting.guestName}
+                          </Text>
+                        </Stack>
+                      </Card>
+                    ))}
+                  </Stack>
+                ) : (
+                  <Table striped withTableBorder visibleFrom="md">
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th>Когда</Table.Th>
+                        <Table.Th>Тип встречи</Table.Th>
+                        <Table.Th>Длительность</Table.Th>
+                        <Table.Th>Гость</Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {meetingsState.meetings.map((meeting) => (
+                        <Table.Tr key={meeting.id}>
+                          <Table.Td>{formatMeetingWhen(meeting.start, meeting.end)}</Table.Td>
+                          <Table.Td>{meeting.meetingTypeTitle}</Table.Td>
+                          <Table.Td>{meeting.durationMinutes} мин</Table.Td>
+                          <Table.Td>{meeting.guestName}</Table.Td>
+                        </Table.Tr>
+                      ))}
+                    </Table.Tbody>
+                  </Table>
+                )}
+              </>
             )}
           </Stack>
         </SimpleGrid>

@@ -511,7 +511,7 @@ export function BookingPage() {
                 )}
 
                 {slotsState.status === 'ready' && (
-                  <Stack gap="sm" ref={bookingControlsRef}>
+                  <Stack gap="sm" ref={bookingControlsRef} style={{ scrollMarginBottom: 16 }}>
                     {!daySlots.some((slot) => slot.available) && (
                       <Text c="dimmed">На этот день свободных слотов нет</Text>
                     )}
