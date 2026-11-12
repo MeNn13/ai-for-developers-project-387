@@ -5,8 +5,67 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import { prepare, resultReply } from './opencode.mjs'
-import { failureNotice } from './opencode-diagnostic.mjs'
+import { failureNotice, diagnosticFor, DiagnosticError } from './opencode-diagnostic.mjs'
+
+test('workflow failure notice posts only a safe comment for missing, invalid and known diagnostics', async () => {
+  const workflow = await readFile('.github/workflows/opencode.yml', 'utf8')
+  const source = workflow
+    .split('          script: |\n')[1]
+    .split('\n')
+    .map((line) => line.slice(12))
+    .join('\n')
+  const directory = await mkdtemp(join(tmpdir(), 'opencode-workflow-'))
+  const previousTemp = process.env.RUNNER_TEMP
+  const previousResult = process.env.ANSWER_RESULT
+  try {
+    process.env.RUNNER_TEMP = directory
+    process.env.ANSWER_RESULT = 'failure'
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(join(directory, 'opencode-diagnostic'))
+    for (const value of [
+      null,
+      'not JSON fake-secret',
+      JSON.stringify({ version: 1, code: 'reply_json', stage: 'reply' }),
+    ]) {
+      const file = join(directory, 'opencode-diagnostic', 'diagnostic.json')
+      if (value === null) await rm(file, { force: true })
+      else await writeFile(file, value)
+      const comments = []
+      const failures = []
+      const execute = new (Object.getPrototypeOf(async function () {}).constructor)(
+        'require',
+        'context',
+        'github',
+        'core',
+        source,
+      )
+      await execute(
+        createRequire(import.meta.url),
+        { repo: { owner: 'example', repo: 'repo' }, runId: 1, payload: { issue: { number: 12 } } },
+        {
+          rest: { issues: { createComment: async (comment) => comments.push(comment) } },
+          request: () => assert.fail('publication started'),
+        },
+        { setFailed: (message) => failures.push(message) },
+      )
+      assert.equal(comments.length, 1)
+      assert.equal(failures.length, 1)
+      assert.doesNotMatch(comments[0].body, /fake-secret/)
+      assert.match(
+        comments[0].body,
+        value?.startsWith('{') ? /Публикация не начиналась/ : /При частичной публикации/,
+      )
+    }
+  } finally {
+    if (previousTemp === undefined) delete process.env.RUNNER_TEMP
+    else process.env.RUNNER_TEMP = previousTemp
+    if (previousResult === undefined) delete process.env.ANSWER_RESULT
+    else process.env.ANSWER_RESULT = previousResult
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 
 test('accepts a single whole-answer JSON fence', () => {
   for (const label of ['json', '']) {
@@ -38,6 +97,114 @@ function answerStream(text, reason = 'stop') {
     .map(JSON.stringify)
     .join('\n')
 }
+
+test('JSON failure reports bounded v2 metadata and fixed parse categories', () => {
+  for (const [text, kind, position] of [
+    ['{"x":"unfinished', 'unexpected_end', 16],
+    ['{} trailing', 'trailing_content', 3],
+    ['"\\q"', 'invalid_escape', 2],
+    ['"line\nfeed"', 'invalid_control', 5],
+    ['{"x":}', 'syntax_other', null],
+    ['position 0', 'syntax_other', null],
+  ]) {
+    assert.throws(
+      () => resultReply(answerStream(text)),
+      (error) => {
+        assert.equal(error.diagnostic.version, 2)
+        assert.equal(error.diagnostic.details.parseKind, kind)
+        assert.equal(error.diagnostic.details.position, position)
+        assert.equal(error.diagnostic.details.candidateChars, text.length)
+        return true
+      },
+    )
+  }
+})
+
+test('unsupported fences stay rejected and unknown parser wording stays safe', (t) => {
+  assert.throws(
+    () => resultReply(answerStream('```typescript\n{}\n```')),
+    (error) => {
+      assert.equal(error.diagnostic.details.wrapper, 'other_fence')
+      return true
+    },
+  )
+  const parse = JSON.parse
+  const stream = answerStream('synthetic candidate')
+  t.mock.method(JSON, 'parse', (text) => {
+    if (text === 'synthetic candidate') throw new SyntaxError('Unknown future wording fake-secret')
+    return parse(text)
+  })
+  assert.throws(
+    () => resultReply(stream),
+    (error) => {
+      assert.equal(error.diagnostic.details.parseKind, 'syntax_other')
+      assert.equal(error.diagnostic.details.position, null)
+      assert.doesNotMatch(JSON.stringify(error), /fake-secret/)
+      return true
+    },
+  )
+})
+
+test('v2 is strictly validated before notices and serialization', () => {
+  let diagnostic
+  try {
+    resultReply(answerStream('{} trailing'))
+  } catch (error) {
+    diagnostic = error.diagnostic
+  }
+  assert.match(failureNotice(diagnostic, 'run'), /Публикация не начиналась/)
+  const invalid = [
+    null,
+    [],
+    { ...diagnostic, extra: 'fake-secret' },
+    { ...diagnostic, stage: 'cli' },
+    { ...diagnostic, details: null },
+  ]
+  for (const field of Object.keys(diagnostic.details)) {
+    for (const value of [-1, 0.5, 2_000_001, 'fake-secret', null, [], {}]) {
+      if (field === 'position' && value === null) continue
+      invalid.push({ ...diagnostic, details: { ...diagnostic.details, [field]: value } })
+    }
+  }
+  invalid.push({ ...diagnostic, details: { ...diagnostic.details, position: 1000 } })
+  invalid.push({ ...diagnostic, details: { ...diagnostic.details, extra: 'fake-secret' } })
+  for (const value of invalid) {
+    assert.match(failureNotice(value, 'run'), /При частичной публикации/)
+    const error = new DiagnosticError('reply_json')
+    error.diagnostic = value
+    assert.deepEqual(diagnosticFor(error), { version: 1, code: 'unknown', stage: 'unknown' })
+  }
+})
+
+test('counts final message events and distinguishes UTF-8 bytes from UTF-16 offsets', () => {
+  const stream = [
+    { type: 'text', part: { messageID: 'first', text: 'Thinking' } },
+    { type: 'text', part: { messageID: 'last', text: '```json\n{"я":"😀"}' } },
+    { type: 'text', part: { messageID: 'last', text: ' x\n```' } },
+    { type: 'step_finish', part: { reason: 'stop' } },
+  ]
+    .map(JSON.stringify)
+    .join('\n')
+  assert.throws(
+    () => resultReply(stream),
+    (error) => {
+      assert.deepEqual(error.diagnostic.details, {
+        streamBytes: 251,
+        eventCount: 4,
+        textEventCount: 3,
+        messageCount: 2,
+        finalTextEventCount: 2,
+        answerBytes: 27,
+        candidateChars: 12,
+        wrapper: 'json_fence',
+        root: 'object',
+        parseKind: 'trailing_content',
+        position: 11,
+      })
+      return true
+    },
+  )
+})
 
 test('distinguishes failures without exposing response or provider secrets', () => {
   const secret = 'fake-key-private-context'
@@ -100,7 +267,8 @@ test('CLI fake writes only safe diagnostic on failure and no reply', async () =>
 test('failure notice accepts only exact known diagnostics and otherwise uses fallback', () => {
   const run = 'https://github.com/example/repo/actions/runs/1'
   const diagnostic = { version: 1, code: 'reply_json', stage: 'reply' }
-  assert.match(failureNotice(diagnostic, run), /Итоговый ответ/)
+  assert.match(failureNotice(diagnostic, run), /Публикация не начиналась/)
+  assert.doesNotMatch(failureNotice(diagnostic, run), /частичной|исходным артефактом/)
   assert.doesNotMatch(failureNotice(diagnostic, run), /ключ|лимит/)
   for (const invalid of [
     undefined,
@@ -173,6 +341,8 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
       if (code) {
         const diagnostic = await readFile(join(directory, 'diagnostic.json'), 'utf8')
         assert.equal(JSON.parse(diagnostic).code, code)
+        assert.ok(Buffer.byteLength(diagnostic) <= 1024)
+        assert.equal(JSON.parse(diagnostic).version, code === 'reply_json' ? 2 : 1)
         assert.doesNotMatch(
           diagnostic + failureNotice(JSON.parse(diagnostic), 'run'),
           /fake-key-private-context/,

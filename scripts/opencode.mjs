@@ -139,6 +139,10 @@ async function github(path, accept = 'application/vnd.github+json') {
 }
 
 function resultText(stream) {
+  let eventCount = 0
+  let textEventCount = 0
+  let finalTextEventCount = 0
+  const messages = new Set()
   let message
   let text = ''
   let finished = false
@@ -156,6 +160,7 @@ function resultText(stream) {
     } catch {
       throw new DiagnosticError('stream_json')
     }
+    eventCount++
     if (event.type === 'error')
       throw new DiagnosticError(
         [401, 403].includes(event.error?.data?.statusCode)
@@ -165,27 +170,74 @@ function resultText(stream) {
             : 'provider_error',
       )
     if (event.type === 'text') {
+      textEventCount++
+      messages.add(event.part.messageID)
       if (event.part.messageID !== message) {
         message = event.part.messageID
         text = ''
+        finalTextEventCount = 0
       }
       text += event.part.text
+      finalTextEventCount++
       finished = false
     }
     if (event.type === 'step_finish') finished = event.part.reason === 'stop'
   }
   if (!finished || !text.trim()) throw new DiagnosticError('incomplete')
-  return text
+  return {
+    text,
+    counters: {
+      streamBytes: Buffer.byteLength(stream),
+      eventCount,
+      textEventCount,
+      messageCount: messages.size,
+      finalTextEventCount,
+    },
+  }
 }
 
 export function resultReply(stream) {
-  const text = resultText(stream).trim()
+  const result = resultText(stream)
+  const text = result.text.trim()
   const fence = text.match(/^```(?:json)?\r?\n([\s\S]*?)\r?\n```$/)
+  const candidate = fence ? fence[1] : text
   let reply
   try {
-    reply = JSON.parse(fence ? fence[1] : text)
-  } catch {
-    throw new DiagnosticError('reply_json')
+    reply = JSON.parse(candidate)
+  } catch (error) {
+    const message = error.message
+    const parseKind =
+      /^(?:Unexpected end of JSON input|Unterminated string in JSON at position \d+)/.test(message)
+        ? 'unexpected_end'
+        : /^Unexpected non-whitespace character after JSON at position \d+/.test(message)
+          ? 'trailing_content'
+          : /^Bad (?:escaped character|Unicode escape) in JSON at position \d+/.test(message)
+            ? 'invalid_escape'
+            : /^Bad control character in string literal in JSON at position \d+/.test(message)
+              ? 'invalid_control'
+              : 'syntax_other'
+    const position = Number(
+      message.match(/ at position (\d+)(?: \(line \d+ column \d+\))?$/)?.[1] ?? NaN,
+    )
+    const first = candidate.trimStart()[0]
+    throw new DiagnosticError('reply_json', {
+      ...result.counters,
+      answerBytes: Buffer.byteLength(text),
+      candidateChars: candidate.length,
+      wrapper: fence
+        ? text.startsWith('```json')
+          ? 'json_fence'
+          : 'bare_fence'
+        : text.startsWith('```')
+          ? 'other_fence'
+          : 'none',
+      root: first === '{' ? 'object' : first === '[' ? 'array' : first ? 'other' : 'empty',
+      parseKind,
+      position:
+        Number.isSafeInteger(position) && position >= 0 && position <= candidate.length
+          ? position
+          : null,
+    })
   }
   try {
     validateReply(reply)
