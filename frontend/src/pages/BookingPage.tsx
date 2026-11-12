@@ -98,6 +98,8 @@ export function BookingPage() {
   // Время последнего успешного перезапроса слотов: подпись «Обновлено в …» (US#36).
   const [slotsUpdatedAt, setSlotsUpdatedAt] = useState<Date | null>(null)
   const nameInputRef = useRef<HTMLInputElement>(null)
+  const bookingControlsRef = useRef<HTMLDivElement>(null)
+  const selectedSlotRef = useRef<HTMLButtonElement>(null)
 
   async function loadSlots(type: MeetingType, keepDay = false) {
     setSlotsState({ status: 'loading' })
@@ -133,6 +135,10 @@ export function BookingPage() {
   useEffect(() => {
     if (selectedSlot) {
       nameInputRef.current?.focus()
+      if (window.matchMedia('(max-width: 61.99em)').matches) {
+        bookingControlsRef.current?.scrollIntoView({ block: 'end' })
+        selectedSlotRef.current?.scrollIntoView({ block: 'nearest' })
+      }
     }
   }, [selectedSlot])
 
@@ -505,32 +511,36 @@ export function BookingPage() {
                 )}
 
                 {slotsState.status === 'ready' && (
-                  <Stack gap="sm">
+                  <Stack gap="sm" ref={bookingControlsRef}>
                     {!daySlots.some((slot) => slot.available) && (
                       <Text c="dimmed">На этот день свободных слотов нет</Text>
                     )}
 
-                    {daySlots.map((slot) => {
-                      const label = timeZone
-                        ? formatTimeRange(slot.start, slot.end, timeZone)
-                        : slot.start
+                    <Stack gap="sm" mah={{ base: 160, md: 'none' }} style={{ overflowY: 'auto' }}>
+                      {daySlots.map((slot) => {
+                        const label = timeZone
+                          ? formatTimeRange(slot.start, slot.end, timeZone)
+                          : slot.start
 
-                      return (
-                        <Button
-                          key={slot.start}
-                          variant={selectedSlot?.start === slot.start ? 'filled' : 'default'}
-                          disabled={!slot.available || submitting}
-                          aria-pressed={selectedSlot?.start === slot.start}
-                          aria-label={slot.available ? label : `${label} занято`}
-                          onClick={() => selectSlot(slot)}
-                          justify="space-between"
-                          fullWidth
-                        >
-                          <span>{label}</span>
-                          {!slot.available && <span>занято</span>}
-                        </Button>
-                      )
-                    })}
+                        return (
+                          <Button
+                            key={slot.start}
+                            ref={selectedSlot?.start === slot.start ? selectedSlotRef : undefined}
+                            style={{ flexShrink: 0 }}
+                            variant={selectedSlot?.start === slot.start ? 'filled' : 'default'}
+                            disabled={!slot.available || submitting}
+                            aria-pressed={selectedSlot?.start === slot.start}
+                            aria-label={slot.available ? label : `${label} занято`}
+                            onClick={() => selectSlot(slot)}
+                            justify="space-between"
+                            fullWidth
+                          >
+                            <span>{label}</span>
+                            {!slot.available && <span>занято</span>}
+                          </Button>
+                        )
+                      })}
+                    </Stack>
 
                     <TextInput
                       ref={nameInputRef}

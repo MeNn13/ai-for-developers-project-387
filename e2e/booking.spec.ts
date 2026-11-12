@@ -18,6 +18,32 @@ async function selectLastWorkingDay(page: Page) {
   throw new Error('No working day in the booking window')
 }
 
+test('mobile guest keeps selected time and booking controls in view', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 })
+  await page.goto('/owner')
+  await page.getByLabel('Название', { exact: true }).fill('Mobile consultation')
+  await page.getByRole('button', { name: 'Создать', exact: true }).click()
+  await expect(page.getByText('Тип встречи создан', { exact: true })).toBeVisible()
+  await page.goto('/book')
+  await page.getByRole('button', { name: /Mobile consultation/ }).click()
+  await selectLastWorkingDay(page)
+  const slot = page.getByRole('button', { name: /^\d{2}:\d{2}–\d{2}:\d{2}$/ }).first()
+  await slot.click()
+  await expect(page.getByLabel('Ваше имя')).toBeFocused()
+  for (const control of [
+    slot,
+    page.getByLabel('Ваше имя'),
+    page.getByRole('button', { name: 'Назад', exact: true }),
+    page.getByRole('button', { name: 'Продолжить', exact: true }),
+  ]) {
+    await expect(control).toBeInViewport({ ratio: 1 })
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.getByLabel('Ваше имя').fill('Mobile Guest')
+  await page.getByRole('button', { name: 'Продолжить', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Встреча забронирована' })).toBeVisible()
+})
+
 test('guest recovers from an overlapping booking in another tab', async ({ page, context }) => {
   await page.goto('/owner')
   for (const [title, duration] of [
