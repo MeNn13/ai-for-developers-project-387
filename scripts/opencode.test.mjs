@@ -1,7 +1,25 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { prepare, resultReply } from './opencode.mjs'
+import { failureNotice } from './opencode-diagnostic.mjs'
+
+test('accepts a single whole-answer JSON fence', () => {
+  for (const label of ['json', '']) {
+    const text = `\`\`\`${label}\n{"version":1,"comment":"Answer"}\n\`\`\``
+    const stream = [
+      { type: 'text', part: { messageID: 'last', text } },
+      { type: 'step_finish', part: { reason: 'stop' } },
+    ]
+      .map(JSON.stringify)
+      .join('\n')
+    assert.deepEqual(resultReply(stream), { version: 1, comment: 'Answer' })
+  }
+})
 
 function event(body = '/oc explain this issue') {
   return {
@@ -11,6 +29,166 @@ function event(body = '/oc explain this issue') {
     comment: { id: 40, body, user: { login: 'MeNn13', type: 'User' } },
   }
 }
+
+function answerStream(text, reason = 'stop') {
+  return [
+    { type: 'text', part: { messageID: 'last', text } },
+    { type: 'step_finish', part: { reason } },
+  ]
+    .map(JSON.stringify)
+    .join('\n')
+}
+
+test('distinguishes failures without exposing response or provider secrets', () => {
+  const secret = 'fake-key-private-context'
+  for (const [stream, code] of [
+    [secret, 'stream_json'],
+    ['null', 'stream_json'],
+    [answerStream(secret), 'reply_json'],
+    [answerStream('{}'), 'reply_schema'],
+    [answerStream('```json\n{}\n```\n```json\n{}\n```'), 'reply_json'],
+    [answerStream('prose\n```json\n{}\n```'), 'reply_json'],
+    [answerStream('{}', 'length'), 'incomplete'],
+    [JSON.stringify({ type: 'error', error: { message: `401 ${secret}` } }), 'provider_error'],
+    [
+      JSON.stringify({ type: 'error', error: { data: { statusCode: 429 }, message: secret } }),
+      'provider_rate',
+    ],
+    [
+      JSON.stringify({ type: 'error', error: { data: { statusCode: 401 }, message: secret } }),
+      'provider_auth',
+    ],
+  ]) {
+    assert.throws(
+      () => resultReply(stream),
+      (error) => {
+        assert.equal(error.diagnostic.code, code)
+        assert.doesNotMatch(JSON.stringify(error), /fake-key-private-context/)
+        return true
+      },
+    )
+  }
+})
+
+test('CLI fake writes only safe diagnostic on failure and no reply', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'opencode-'))
+  try {
+    await writeFile(join(directory, 'context.json'), 'fake-key-private-context')
+    // Node is the fake binary: it rejects OpenCode arguments and exits nonzero.
+    const result = spawnSync(process.execPath, ['scripts/opencode.mjs', 'run'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        OPENCODE_IO: directory,
+        OPENCODE_API_KEY: 'fake-key-private-context',
+        OPENCODE_BIN: process.execPath,
+      },
+    })
+    assert.equal(result.status, 1)
+    const diagnostic = await readFile(join(directory, 'diagnostic.json'), 'utf8')
+    assert.equal(JSON.parse(diagnostic).code, 'cli_exit')
+    assert.doesNotMatch(
+      result.stdout + result.stderr + diagnostic,
+      /fake-key-private-context|bad option/,
+    )
+    await assert.rejects(readFile(join(directory, 'reply.json')))
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('failure notice accepts only exact known diagnostics and otherwise uses fallback', () => {
+  const run = 'https://github.com/example/repo/actions/runs/1'
+  const diagnostic = { version: 1, code: 'reply_json', stage: 'reply' }
+  assert.match(failureNotice(diagnostic, run), /Итоговый ответ/)
+  assert.doesNotMatch(failureNotice(diagnostic, run), /ключ|лимит/)
+  for (const invalid of [
+    undefined,
+    {},
+    { version: 1, code: { toString: null }, stage: 'reply' },
+    { ...diagnostic, extra: 'fake-secret' },
+    { ...diagnostic, stage: 'fake-secret' },
+    { ...diagnostic, code: 'fake-secret' },
+  ]) {
+    const notice = failureNotice(invalid, run)
+    assert.match(notice, /не завершил подготовку или публикацию/)
+    assert.doesNotMatch(notice, /fake-secret/)
+    assert.ok(notice.includes(run))
+  }
+})
+
+test('fake CLI covers completed answers, failures and safe artifacts end to end', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'opencode-stream-'))
+  try {
+    const fake = join(directory, 'fake.mjs')
+    await writeFile(
+      fake,
+      `
+      if (process.argv[1]?.endsWith('run')) {
+        process.stdin.resume();
+        await new Promise(() => process.stdin.on('end', () => {
+          process.stderr.write('fake-key-private-context');
+          process.stdout.write(process.env.FAKE_STREAM, () => process.exit(0));
+        }));
+      }
+    `,
+    )
+    await writeFile(join(directory, 'context.json'), 'fake-key-private-context')
+    for (const [stream, code] of [
+      [answerStream('```json\n{"version":1,"comment":"Answer"}\n```'), null],
+      ['fake-key-private-context', 'stream_json'],
+      [answerStream('fake-key-private-context'), 'reply_json'],
+      [answerStream('{"secret":"fake-key-private-context"}'), 'reply_schema'],
+      [answerStream('{}', 'length'), 'incomplete'],
+      [
+        JSON.stringify({ type: 'error', error: { message: 'fake-key-private-context' } }),
+        'provider_error',
+      ],
+      ['x'.repeat(2_000_001), 'stream_limit'],
+    ]) {
+      await rm(join(directory, 'reply.json'), { force: true })
+      await rm(join(directory, 'diagnostic.json'), { force: true })
+      // A preload turns Node into a cross-platform fake OPENCODE_BIN.
+      await writeFile(join(directory, 'stream.txt'), stream)
+      // Keep large streams in a file to avoid OS environment-size limits.
+      const loader = join(directory, 'loader.mjs')
+      await writeFile(
+        loader,
+        `import { readFileSync } from 'node:fs';
+        if (process.argv[1]?.endsWith('run')) process.env.FAKE_STREAM = readFileSync(new URL('./stream.txt', import.meta.url), 'utf8');
+        await import('./fake.mjs');`,
+      )
+      const result = spawnSync(process.execPath, ['scripts/opencode.mjs', 'run'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          NODE_OPTIONS: `--import=${pathToFileURL(loader).href}`,
+          OPENCODE_BIN: process.execPath,
+          OPENCODE_IO: directory,
+          OPENCODE_API_KEY: 'fake-key-private-context',
+        },
+      })
+      assert.equal(result.status, code ? 1 : 0, result.stderr)
+      assert.doesNotMatch(result.stdout + result.stderr, /fake-key-private-context/)
+      if (code) {
+        const diagnostic = await readFile(join(directory, 'diagnostic.json'), 'utf8')
+        assert.equal(JSON.parse(diagnostic).code, code)
+        assert.doesNotMatch(
+          diagnostic + failureNotice(JSON.parse(diagnostic), 'run'),
+          /fake-key-private-context/,
+        )
+        await assert.rejects(readFile(join(directory, 'reply.json')))
+      } else {
+        assert.deepEqual(JSON.parse(await readFile(join(directory, 'reply.json'), 'utf8')), {
+          version: 1,
+          comment: 'Answer',
+        })
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 
 test('trusted issue command receives discussion up to the requesting comment', async () => {
   const request = event()
@@ -146,7 +324,7 @@ test('CLI reports a missing provider key without invoking the model', () => {
     env: { ...process.env, OPENCODE_IO: 'unused', OPENCODE_API_KEY: '' },
   })
   assert.equal(result.status, 1)
-  assert.match(result.stderr, /OPENCODE_API_KEY is missing/)
+  assert.match(result.stderr, /configuration/)
   assert.equal(result.stdout, '')
 })
 
