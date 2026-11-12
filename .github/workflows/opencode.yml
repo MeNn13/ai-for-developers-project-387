@@ -90,6 +90,13 @@ jobs:
           name: opencode-reply
           path: ${{ runner.temp }}/opencode-io/reply.json
           retention-days: 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure() && !cancelled()
+        with:
+          name: opencode-diagnostic
+          path: ${{ runner.temp }}/opencode-io/diagnostic.json
+          if-no-files-found: ignore
+          retention-days: 1
 
   publish:
     needs: [context, answer]
@@ -117,6 +124,12 @@ jobs:
         with:
           name: opencode-reply
           path: ${{ runner.temp }}/opencode-reply
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.answer.result == 'failure'
+        continue-on-error: true
+        with:
+          name: opencode-diagnostic
+          path: ${{ runner.temp }}/opencode-diagnostic
       - name: Publish answer or failure notice
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
@@ -127,13 +140,14 @@ jobs:
             const path = require('node:path');
             const run = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const issue_number = context.payload.issue?.number ?? context.payload.pull_request.number;
+            const { pathToFileURL } = require('node:url');
+            const { failureNotice } = await import(pathToFileURL(path.resolve('scripts/opencode-diagnostic.mjs')).href);
             try {
               if (process.env.ANSWER_RESULT !== 'success') throw new Error('Model job failed');
               const prepared = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-context', 'context.json'), 'utf8'));
               if (prepared.number !== issue_number || prepared.requestId !== context.payload.comment.id ||
                   prepared.repository !== `${context.repo.owner}/${context.repo.repo}`) throw new Error('Context mismatch');
               const reply = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-reply', 'reply.json'), 'utf8'));
-              const { pathToFileURL } = require('node:url');
               const { publish } = await import(pathToFileURL(path.resolve('scripts/opencode-publish.mjs')).href);
               const api = async (method, route, data = {}) => {
                 const response = await github.request(`${method} /repos/{owner}/{repo}${route}`, { ...context.repo, ...data });
@@ -141,8 +155,14 @@ jobs:
               };
               await publish(reply, prepared, api, run);
             } catch (error) {
-              if (error.message?.startsWith('Invalid OpenCode publication:')) core.error(error.message);
+              let diagnostic;
+              if (process.env.ANSWER_RESULT !== 'success') {
+                try {
+                  const file = path.join(process.env.RUNNER_TEMP, 'opencode-diagnostic', 'diagnostic.json');
+                  if ((await fs.stat(file)).size <= 1024) diagnostic = JSON.parse(await fs.readFile(file, 'utf8'));
+                } catch {}
+              }
               await github.rest.issues.createComment({ ...context.repo, issue_number,
-                body: `OpenCode не завершил подготовку или публикацию. Проверьте прогон, OPENCODE_API_KEY, лимиты модели и права GitHub. При частичной публикации повторите этот прогон с исходным артефактом; созданные issues сохраняются. [Actions](${run})` });
+                body: failureNotice(diagnostic, run) });
               core.setFailed('OpenCode preparation or publication failed.');
             }

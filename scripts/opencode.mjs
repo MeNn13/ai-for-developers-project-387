@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import { resolve, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { trustedHuman, validateReply } from './opencode-publish.mjs'
+import { DiagnosticError, diagnosticFor } from './opencode-diagnostic.mjs'
 
 const model = 'opencode/glm-5.3-flash-free'
 
@@ -142,10 +143,26 @@ function resultText(stream) {
   let text = ''
   let finished = false
   for (const line of stream.split(/\r?\n/).filter(Boolean)) {
-    const event = JSON.parse(line)
+    let event
+    try {
+      event = JSON.parse(line)
+      if (!event || typeof event !== 'object' || typeof event.type !== 'string') throw new Error()
+      if (
+        event.type === 'text' &&
+        (typeof event.part?.text !== 'string' || typeof event.part?.messageID !== 'string')
+      )
+        throw new Error()
+      if (event.type === 'step_finish' && typeof event.part?.reason !== 'string') throw new Error()
+    } catch {
+      throw new DiagnosticError('stream_json')
+    }
     if (event.type === 'error')
-      throw new WorkflowError(
-        'Model returned an error. Check provider key, availability and limits.',
+      throw new DiagnosticError(
+        [401, 403].includes(event.error?.data?.statusCode)
+          ? 'provider_auth'
+          : event.error?.data?.statusCode === 429
+            ? 'provider_rate'
+            : 'provider_error',
       )
     if (event.type === 'text') {
       if (event.part.messageID !== message) {
@@ -157,20 +174,36 @@ function resultText(stream) {
     }
     if (event.type === 'step_finish') finished = event.part.reason === 'stop'
   }
-  if (!finished || !text.trim()) throw new WorkflowError('No completed model answer.')
+  if (!finished || !text.trim()) throw new DiagnosticError('incomplete')
   return text
 }
 
 export function resultReply(stream) {
-  const reply = JSON.parse(resultText(stream))
-  validateReply(reply)
+  const text = resultText(stream).trim()
+  const fence = text.match(/^```(?:json)?\r?\n([\s\S]*?)\r?\n```$/)
+  let reply
+  try {
+    reply = JSON.parse(fence ? fence[1] : text)
+  } catch {
+    throw new DiagnosticError('reply_json')
+  }
+  try {
+    validateReply(reply)
+  } catch {
+    throw new DiagnosticError('reply_schema')
+  }
   return reply
 }
 
 async function run(directory) {
-  if (!process.env.OPENCODE_API_KEY) throw new WorkflowError('OPENCODE_API_KEY is missing.')
-  const context = await readFile(join(directory, 'context.json'), 'utf8')
-  const prompt = await readFile('.github/opencode/prompt.txt', 'utf8')
+  if (!process.env.OPENCODE_API_KEY) throw new DiagnosticError('configuration')
+  let context, prompt
+  try {
+    context = await readFile(join(directory, 'context.json'), 'utf8')
+    prompt = await readFile('.github/opencode/prompt.txt', 'utf8')
+  } catch {
+    throw new DiagnosticError('file_read')
+  }
   const child = spawn(
     process.env.OPENCODE_BIN ?? 'opencode',
     [
@@ -200,13 +233,17 @@ async function run(directory) {
   // Provider output can contain request context; do not copy it to public logs.
   child.stderr.resume()
   const status = await new Promise((resolveExit, reject) => {
-    child.once('error', reject)
+    child.once('error', () => reject(new DiagnosticError('cli_start')))
     child.once('close', resolveExit)
   })
-  if (status !== 0 || bytes > 2_000_000)
-    throw new WorkflowError('OpenCode CLI failed. Check provider key, availability and limits.')
+  if (bytes > 2_000_000) throw new DiagnosticError('stream_limit')
+  if (status !== 0) throw new DiagnosticError('cli_exit')
   const reply = resultReply(stream)
-  await writeFile(join(directory, 'reply.json'), JSON.stringify(reply))
+  try {
+    await writeFile(join(directory, 'reply.json'), JSON.stringify(reply))
+  } catch {
+    throw new DiagnosticError('file_write')
+  }
 }
 
 async function main() {
@@ -227,12 +264,19 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main().catch((error) => {
-    console.error(
-      error instanceof WorkflowError
-        ? error.message
-        : 'OpenCode workflow failed. Check configuration, model availability and provider limits.',
-    )
+  main().catch(async (error) => {
+    const diagnostic = diagnosticFor(error)
+    console.error(JSON.stringify(diagnostic))
+    if (process.env.OPENCODE_IO) {
+      try {
+        await writeFile(
+          join(process.env.OPENCODE_IO, 'diagnostic.json'),
+          JSON.stringify(diagnostic),
+        )
+      } catch {
+        console.error(JSON.stringify(diagnosticFor(new DiagnosticError('file_write'))))
+      }
+    }
     process.exitCode = 1
   })
 }
