@@ -22,6 +22,7 @@ import { createMeeting, listMeetingTypes, listSlots } from '../api/generated/boo
 import type { Meeting, MeetingType, Slot, SlotDay, SlotsResponse } from '../api/generated/booking'
 import { formatMeetingConfirmation, formatTimeOfDay, formatTimeRange } from '../lib/moscowTime'
 import { isProblemDetails } from '../lib/problemDetails'
+import classes from './BookingPage.module.css'
 
 type TypesState =
   { status: 'loading' } | { status: 'error' } | { status: 'ready'; types: MeetingType[] }
@@ -98,6 +99,8 @@ export function BookingPage() {
   // Время последнего успешного перезапроса слотов: подпись «Обновлено в …» (US#36).
   const [slotsUpdatedAt, setSlotsUpdatedAt] = useState<Date | null>(null)
   const nameInputRef = useRef<HTMLInputElement>(null)
+  const bookingControlsRef = useRef<HTMLDivElement>(null)
+  const selectedSlotRef = useRef<HTMLButtonElement>(null)
 
   async function loadSlots(type: MeetingType, keepDay = false) {
     setSlotsState({ status: 'loading' })
@@ -133,6 +136,10 @@ export function BookingPage() {
   useEffect(() => {
     if (selectedSlot) {
       nameInputRef.current?.focus()
+      if (window.matchMedia('(max-width: 61.99em)').matches) {
+        bookingControlsRef.current?.scrollIntoView({ block: 'end' })
+        selectedSlotRef.current?.scrollIntoView({ block: 'nearest' })
+      }
     }
   }, [selectedSlot])
 
@@ -307,7 +314,9 @@ export function BookingPage() {
           <Paper withBorder p="md">
             <Stack gap="sm" align="flex-start">
               <Title order={2}>Встреча забронирована</Title>
-              <Text fw={600}>{confirmation.meetingTypeTitle}</Text>
+              <Text fw={600} className={classes.confirmationText}>
+                {confirmation.meetingTypeTitle}
+              </Text>
               <Text>
                 {formatMeetingConfirmation(
                   confirmation.start,
@@ -315,7 +324,7 @@ export function BookingPage() {
                   timeZone ?? 'Europe/Moscow',
                 )}
               </Text>
-              <Text>{confirmation.guestName}</Text>
+              <Text className={classes.confirmationText}>{confirmation.guestName}</Text>
               <Button onClick={bookAgain}>Записаться ещё</Button>
             </Stack>
           </Paper>
@@ -505,32 +514,36 @@ export function BookingPage() {
                 )}
 
                 {slotsState.status === 'ready' && (
-                  <Stack gap="sm">
+                  <Stack gap="sm" ref={bookingControlsRef} style={{ scrollMarginBottom: 16 }}>
                     {!daySlots.some((slot) => slot.available) && (
                       <Text c="dimmed">На этот день свободных слотов нет</Text>
                     )}
 
-                    {daySlots.map((slot) => {
-                      const label = timeZone
-                        ? formatTimeRange(slot.start, slot.end, timeZone)
-                        : slot.start
+                    <Stack gap="sm" mah={{ base: 160, md: 'none' }} style={{ overflowY: 'auto' }}>
+                      {daySlots.map((slot) => {
+                        const label = timeZone
+                          ? formatTimeRange(slot.start, slot.end, timeZone)
+                          : slot.start
 
-                      return (
-                        <Button
-                          key={slot.start}
-                          variant={selectedSlot?.start === slot.start ? 'filled' : 'default'}
-                          disabled={!slot.available || submitting}
-                          aria-pressed={selectedSlot?.start === slot.start}
-                          aria-label={slot.available ? label : `${label} занято`}
-                          onClick={() => selectSlot(slot)}
-                          justify="space-between"
-                          fullWidth
-                        >
-                          <span>{label}</span>
-                          {!slot.available && <span>занято</span>}
-                        </Button>
-                      )
-                    })}
+                        return (
+                          <Button
+                            key={slot.start}
+                            ref={selectedSlot?.start === slot.start ? selectedSlotRef : undefined}
+                            style={{ flexShrink: 0 }}
+                            variant={selectedSlot?.start === slot.start ? 'filled' : 'default'}
+                            disabled={!slot.available || submitting}
+                            aria-pressed={selectedSlot?.start === slot.start}
+                            aria-label={slot.available ? label : `${label} занято`}
+                            onClick={() => selectSlot(slot)}
+                            justify="space-between"
+                            fullWidth
+                          >
+                            <span>{label}</span>
+                            {!slot.available && <span>занято</span>}
+                          </Button>
+                        )
+                      })}
+                    </Stack>
 
                     <TextInput
                       ref={nameInputRef}
