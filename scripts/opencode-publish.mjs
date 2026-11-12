@@ -14,43 +14,52 @@ function text(value, limit) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= limit
 }
 
+export class ReplyValidationError extends Error {
+  constructor(rule) {
+    super('Invalid OpenCode reply schema')
+    this.rule = rule
+  }
+}
+
+function requireReply(condition, rule) {
+  if (!condition) throw new ReplyValidationError(rule)
+}
+
 export function validateReply(reply) {
-  requireValid(reply?.version === 1 && text(reply.comment, 500_000), 'version or comment')
+  requireReply(reply?.version === 1 && text(reply.comment, 500_000), 'version_comment')
   const publication = reply.publication
   if (publication == null) return
-  requireValid(['spec', 'tickets'].includes(publication.kind), 'kind')
-  requireValid(
+  requireReply(['spec', 'tickets'].includes(publication.kind), 'publication_kind')
+  requireReply(
     Array.isArray(publication.items) &&
       publication.items.length > 0 &&
       publication.items.length <= 20,
-    'items',
+    'publication_items',
   )
-  if (publication.kind === 'spec')
-    requireValid(publication.items.length === 1, 'one specification required')
+  if (publication.kind === 'spec') requireReply(publication.items.length === 1, 'spec_item_count')
   else
-    requireValid(
+    requireReply(
       positive(publication.spec) && positive(publication.approvalComment),
-      'specification and approval required',
+      'ticket_references',
     )
   const keys = new Set()
   for (const item of publication.items) {
-    requireValid(
+    requireReply(
       typeof item.key === 'string' &&
         /^[a-z][a-z0-9-]{0,39}$/.test(item.key) &&
         !keys.has(item.key),
-      'unique item key',
+      'item_key',
     )
-    requireValid(text(item.title, 200) && text(item.body, 50_000), 'title or body')
-    requireValid(
+    requireReply(text(item.title, 200) && text(item.body, 50_000), 'item_text')
+    requireReply(
       Array.isArray(item.blockedBy) && new Set(item.blockedBy).size === item.blockedBy.length,
-      'blockers',
+      'item_blockers',
     )
-    requireValid(
+    requireReply(
       item.blockedBy.every((key) => keys.has(key)),
-      'blockers must precede the item',
+      'blocker_order',
     )
-    if (publication.kind === 'spec')
-      requireValid(item.blockedBy.length === 0, 'specification blockers')
+    if (publication.kind === 'spec') requireReply(item.blockedBy.length === 0, 'spec_blockers')
     keys.add(item.key)
   }
 }

@@ -2,7 +2,7 @@ import { appendFile, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { resolve, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { trustedHuman, validateReply } from './opencode-publish.mjs'
+import { trustedHuman, validateReply, ReplyValidationError } from './opencode-publish.mjs'
 import { DiagnosticError, diagnosticFor } from './opencode-diagnostic.mjs'
 
 const model = 'opencode/glm-5.3-flash-free'
@@ -241,8 +241,10 @@ export function resultReply(stream) {
   }
   try {
     validateReply(reply)
-  } catch {
-    throw new DiagnosticError('reply_schema')
+  } catch (error) {
+    throw new DiagnosticError('reply_schema', {
+      rule: error instanceof ReplyValidationError ? error.rule : 'schema_other',
+    })
   }
   return reply
 }
