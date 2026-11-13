@@ -2,7 +2,12 @@ import { appendFile, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { resolve, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { trustedHuman, validateReply, ReplyValidationError } from './opencode-publish.mjs'
+import {
+  trustedHuman,
+  triageEligible,
+  validateReply,
+  ReplyValidationError,
+} from './opencode-publish.mjs'
 import { DiagnosticError, diagnosticFor } from './opencode-diagnostic.mjs'
 
 const model = 'opencode/glm-5.3-flash-free'
@@ -21,6 +26,26 @@ async function pages(api, path) {
 }
 
 export async function prepare(eventName, event, api) {
+  if (eventName === 'issues') {
+    if (event.action !== 'opened' || !triageEligible(event.issue)) return null
+    const issue = await api(`/issues/${event.issue.number}`)
+    if (!triageEligible(issue)) return null
+    const context = {
+      mode: 'triage',
+      number: issue.number,
+      requestId: issue.id,
+      repository: event.repository.full_name,
+      checkout: process.env.CHECKOUT_SHA,
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels,
+      comments: await pages(api, `/issues/${issue.number}/comments`),
+      request: 'Apply triage: preliminary analysis, questions and label recommendations only.',
+    }
+    const serialized = JSON.stringify(context)
+    if (Buffer.byteLength(serialized) > 300_000) throw new WorkflowError('Context exceeds 300 KB.')
+    return { number: issue.number, context: serialized }
+  }
   if (
     !['issue_comment', 'pull_request_review_comment'].includes(eventName) ||
     event.action !== 'created' ||
@@ -254,7 +279,12 @@ async function run(directory) {
   let context, prompt
   try {
     context = await readFile(join(directory, 'context.json'), 'utf8')
-    prompt = await readFile('.github/opencode/prompt.txt', 'utf8')
+    prompt = await readFile(
+      JSON.parse(context).mode === 'triage'
+        ? '.github/opencode/triage-prompt.txt'
+        : '.github/opencode/prompt.txt',
+      'utf8',
+    )
   } catch {
     throw new DiagnosticError('file_read')
   }
