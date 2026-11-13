@@ -405,11 +405,23 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
       }
     `,
     )
-    await writeFile(
-      join(directory, 'context.json'),
-      JSON.stringify({ body: 'fake-key-private-context' }),
-    )
-    for (const [stream, code] of [
+    const markdown = '## Разбор\n\n```text\nПроверить отмену встречи\n```\n\nНужно уточнение.'
+    for (const [stream, code, mode, comment = 'Answer'] of [
+      [answerStream(markdown), null, 'triage', markdown],
+      [answerStream(markdown), 'reply_json'],
+      [answerStream('   '), 'incomplete', 'triage'],
+      [answerStream(markdown, 'length'), 'incomplete', 'triage'],
+      [answerStream('x'.repeat(50_001)), 'stream_limit', 'triage'],
+      ['not JSONL', 'stream_json', 'triage'],
+      [
+        [
+          JSON.stringify({ type: 'text', part: { messageID: 'earlier', text: 'Earlier answer' } }),
+          answerStream(markdown),
+        ].join('\n'),
+        null,
+        'triage',
+        markdown,
+      ],
       [answerStream('```json\n{"version":1,"comment":"Answer"}\n```'), null],
       ['fake-key-private-context', 'stream_json'],
       [answerStream('fake-key-private-context'), 'reply_json'],
@@ -421,6 +433,10 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
       ],
       ['x'.repeat(2_000_001), 'stream_limit'],
     ]) {
+      await writeFile(
+        join(directory, 'context.json'),
+        JSON.stringify({ body: 'fake-key-private-context', mode }),
+      )
       await rm(join(directory, 'reply.json'), { force: true })
       await rm(join(directory, 'diagnostic.json'), { force: true })
       // A preload turns Node into a cross-platform fake OPENCODE_BIN.
@@ -463,7 +479,8 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
       } else {
         assert.deepEqual(JSON.parse(await readFile(join(directory, 'reply.json'), 'utf8')), {
           version: 1,
-          comment: 'Answer',
+          comment,
+          ...(mode === 'triage' ? { publication: null } : {}),
         })
       }
     }
