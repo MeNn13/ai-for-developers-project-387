@@ -13,6 +13,7 @@ test('workflow failure notice posts only a safe comment for missing, invalid and
   const workflow = await readFile('.github/workflows/opencode.yml', 'utf8')
   const source = workflow
     .split('          script: |\n')[1]
+    .split('\n  publish-triage:')[0]
     .split('\n')
     .map((line) => line.slice(12))
     .join('\n')
@@ -340,7 +341,10 @@ test('distinguishes failures without exposing response or provider secrets', () 
 test('CLI fake writes only safe diagnostic on failure and no reply', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'opencode-'))
   try {
-    await writeFile(join(directory, 'context.json'), 'fake-key-private-context')
+    await writeFile(
+      join(directory, 'context.json'),
+      JSON.stringify({ body: 'fake-key-private-context' }),
+    )
     // Node is the fake binary: it rejects OpenCode arguments and exits nonzero.
     const result = spawnSync(process.execPath, ['scripts/opencode.mjs', 'run'], {
       encoding: 'utf8',
@@ -401,7 +405,10 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
       }
     `,
     )
-    await writeFile(join(directory, 'context.json'), 'fake-key-private-context')
+    await writeFile(
+      join(directory, 'context.json'),
+      JSON.stringify({ body: 'fake-key-private-context' }),
+    )
     for (const [stream, code] of [
       [answerStream('```json\n{"version":1,"comment":"Answer"}\n```'), null],
       ['fake-key-private-context', 'stream_json'],

@@ -1,6 +1,8 @@
 name: opencode
 
 on:
+  issues:
+    types: [opened]
   issue_comment:
     types: [created]
   pull_request_review_comment:
@@ -10,14 +12,17 @@ permissions: {}
 
 concurrency:
   # Only reruns of this comment compete here. Admitted requests compete below.
-  group: opencode-comment-${{ github.event.comment.id }}
+  group: opencode-${{ github.event_name }}-${{ github.event.comment.id || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
   context:
     if: >-
-      github.event.comment.user.type == 'User' &&
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+      (github.event_name == 'issues' && github.event.issue.user.type == 'User' &&
+       github.event.issue.user.login == 'MeNn13' &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)) ||
+      (github.event_name != 'issues' && github.event.comment.user.type == 'User' &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -55,7 +60,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:
-      group: opencode-${{ github.event.issue.number || github.event.pull_request.number }}
+      group: opencode-answer-${{ github.event_name == 'issues' && 'triage' || 'manual' }}-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -100,7 +105,7 @@ jobs:
 
   publish:
     needs: [context, answer]
-    if: always() && needs.context.outputs.allowed == 'true' && needs.answer.result != 'cancelled'
+    if: always() && github.event_name != 'issues' && needs.context.outputs.allowed == 'true' && needs.answer.result != 'cancelled'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     concurrency:
@@ -145,7 +150,10 @@ jobs:
             try {
               if (process.env.ANSWER_RESULT !== 'success') throw new Error('Model job failed');
               const prepared = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-context', 'context.json'), 'utf8'));
-              if (prepared.number !== issue_number || prepared.requestId !== context.payload.comment.id ||
+              const automatic = context.eventName === 'issues';
+              const requestId = automatic ? context.payload.issue.id : context.payload.comment.id;
+              if (prepared.number !== issue_number || prepared.requestId !== requestId ||
+                  (prepared.mode === 'triage') !== automatic ||
                   prepared.repository !== `${context.repo.owner}/${context.repo.repo}`) throw new Error('Context mismatch');
               const reply = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-reply', 'reply.json'), 'utf8'));
               const { publish } = await import(pathToFileURL(path.resolve('scripts/opencode-publish.mjs')).href);
@@ -166,3 +174,52 @@ jobs:
                 body: failureNotice(diagnostic, run) });
               core.setFailed('OpenCode preparation or publication failed.');
             }
+
+  publish-triage:
+    needs: [context, answer]
+    if: always() && github.event_name == 'issues' && needs.context.outputs.allowed == 'true' && needs.answer.result != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: opencode-triage-publish-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.context.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: opencode-context
+          path: ${{ runner.temp }}/opencode-context
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.answer.result == 'success'
+        with:
+          name: opencode-reply
+          path: ${{ runner.temp }}/opencode-reply
+      - name: Publish preliminary triage
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          ANSWER_RESULT: ${{ needs.answer.result }}
+        with:
+          script: |
+            if (process.env.ANSWER_RESULT !== 'success') {
+              core.setFailed('Automatic triage failed. See answer job diagnostics; retry with /oc after resolving the failure.');
+              return;
+            }
+            const fs = require('node:fs/promises');
+            const path = require('node:path');
+            const { pathToFileURL } = require('node:url');
+            const prepared = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-context', 'context.json'), 'utf8'));
+            if (prepared.mode !== 'triage' || prepared.number !== context.payload.issue.number ||
+                prepared.requestId !== context.payload.issue.id ||
+                prepared.repository !== `${context.repo.owner}/${context.repo.repo}`) throw new Error('Context mismatch');
+            const reply = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-reply', 'reply.json'), 'utf8'));
+            const { publish } = await import(pathToFileURL(path.resolve('scripts/opencode-publish.mjs')).href);
+            await publish(reply, prepared, async (method, route, data = {}) => {
+              const response = await github.request(`${method} /repos/{owner}/{repo}${route}`, { ...context.repo, ...data });
+              return response.data;
+            }, `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`);
