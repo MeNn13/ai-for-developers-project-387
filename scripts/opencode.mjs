@@ -276,13 +276,12 @@ export function resultReply(stream) {
 
 async function run(directory) {
   if (!process.env.OPENCODE_API_KEY) throw new DiagnosticError('configuration')
-  let context, prompt
+  let context, prompt, automatic
   try {
     context = await readFile(join(directory, 'context.json'), 'utf8')
+    automatic = JSON.parse(context).mode === 'triage'
     prompt = await readFile(
-      JSON.parse(context).mode === 'triage'
-        ? '.github/opencode/triage-prompt.txt'
-        : '.github/opencode/prompt.txt',
+      automatic ? '.github/opencode/triage-prompt.txt' : '.github/opencode/prompt.txt',
       'utf8',
     )
   } catch {
@@ -322,7 +321,14 @@ async function run(directory) {
   })
   if (bytes > 2_000_000) throw new DiagnosticError('stream_limit')
   if (status !== 0) throw new DiagnosticError('cli_exit')
-  const reply = resultReply(stream)
+  let reply
+  if (automatic) {
+    const comment = resultText(stream).text.trim()
+    if (comment.length > 50_000) throw new DiagnosticError('stream_limit')
+    reply = { version: 1, comment, publication: null }
+  } else {
+    reply = resultReply(stream)
+  }
   try {
     await writeFile(join(directory, 'reply.json'), JSON.stringify(reply))
   } catch {

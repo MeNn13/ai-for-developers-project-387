@@ -207,7 +207,7 @@ jobs:
         with:
           script: |
             if (process.env.ANSWER_RESULT !== 'success') {
-              core.setFailed('Automatic triage failed. See answer job diagnostics; retry with /oc after resolving the failure.');
+              core.setFailed('Automatic triage failed. See answer job diagnostics. Retry failed jobs for transient failures; after code fixes, create a new issue after merge.');
               return;
             }
             const fs = require('node:fs/promises');
