@@ -1,0 +1,94 @@
+name: independent-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: independent-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.user.login == 'MeNn13' ||
+       (vars.REVIEW_APP_LOGIN != '' && github.event.pull_request.user.login == vars.REVIEW_APP_LOGIN &&
+        format('{0}', github.event.pull_request.user.id) == vars.REVIEW_APP_ID))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      checks: read
+      statuses: read
+    outputs:
+      allowed: ${{ steps.context.outputs.allowed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Collect independent review grounds
+        id: context
+        run: node scripts/opencode-review.mjs prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENCODE_IO: ${{ runner.temp }}/review
+          REVIEW_APP_LOGIN: ${{ vars.REVIEW_APP_LOGIN }}
+          REVIEW_APP_ID: ${{ vars.REVIEW_APP_ID }}
+      - name: Install pinned OpenCode CLI
+        if: steps.context.outputs.allowed == 'true'
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/anomalyco/opencode/releases/download/v2.2.3/opencode-linux-x64.tar.gz \
+            --output "$RUNNER_TEMP/opencode.tar.gz"
+          echo "ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35  $RUNNER_TEMP/opencode.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/opencode-bin"
+          tar -xzf "$RUNNER_TEMP/opencode.tar.gz" -C "$RUNNER_TEMP/opencode-bin"
+          echo "$RUNNER_TEMP/opencode-bin" >> "$GITHUB_PATH"
+          sudo mkdir -p /etc/opencode
+          jq '.update = "disable"' .github/opencode/opencode.json | sudo tee /etc/opencode/opencode.json > /dev/null
+      - name: Run independent review
+        if: steps.context.outputs.allowed == 'true'
+        run: node scripts/opencode-review.mjs run
+        env:
+          OPENCODE_IO: ${{ runner.temp }}/review
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.context.outputs.allowed == 'true'
+        with:
+          name: independent-review
+          path: ${{ runner.temp }}/review/*.json
+          retention-days: 1
+
+  publish:
+    needs: review
+    if: needs.review.outputs.allowed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: independent-review
+          path: ${{ runner.temp }}/review
+      - name: Publish review without model
+        run: node scripts/opencode-review.mjs publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENCODE_IO: ${{ runner.temp }}/review
+          REVIEW_APP_LOGIN: ${{ vars.REVIEW_APP_LOGIN }}
+          REVIEW_APP_ID: ${{ vars.REVIEW_APP_ID }}
