@@ -72,12 +72,7 @@ test('workflow failure notice posts only a safe comment for missing, invalid and
       assert.equal(comments.length, 1)
       assert.equal(failures.length, 1)
       assert.doesNotMatch(comments[0].body, /fake-secret/)
-      assert.match(
-        comments[0].body,
-        value?.startsWith('{') && !value.includes('fake-secret')
-          ? /Публикация не начиналась/
-          : /При частичной публикации/,
-      )
+      assert.match(comments[0].body, /При частичной публикации/)
     }
   } finally {
     if (previousTemp === undefined) delete process.env.RUNNER_TEMP

@@ -12,6 +12,7 @@ const categories = {
   file_read: ['files', 'Не удалось прочитать входные файлы.'],
   file_write: ['files', 'Не удалось записать результат подготовки.'],
   configuration: ['configuration', 'Не задана необходимая конфигурация OpenCode.'],
+  publication: ['publish', 'Не удалось завершить публикацию.'],
   unknown: ['unknown', 'OpenCode не завершил подготовку или публикацию.'],
 }
 
@@ -23,6 +24,7 @@ export class DiagnosticError extends Error {
       this.diagnostic = { version: 2, code, stage: 'reply', details }
     if (code === 'reply_schema' && details?.reason !== undefined)
       this.diagnostic = { version: 3, code, stage: 'reply', details }
+    if (code === 'publication') this.diagnostic = { version: 3, code, stage: 'publish', details }
   }
 }
 
@@ -53,6 +55,14 @@ function validDiagnostic(value) {
     value.stage !== categories[value.code][0]
   )
     return false
+  if (value.code === 'publication')
+    return (
+      value.version === 3 &&
+      exactKeys(value, 'version,code,stage,details') &&
+      exactKeys(value.details, 'reason,state') &&
+      Object.hasOwn(publicationReasons, value.details.reason) &&
+      ['none', 'possible', 'unknown'].includes(value.details.state)
+    )
   if (value.version === 1) return exactKeys(value, 'version,code,stage')
   if (value.version === 3)
     return (
@@ -132,8 +142,45 @@ const schemaReasons = {
   reference: 'Ссылка ведёт не на ранее перечисленный элемент в поле',
 }
 
-export function failureNotice(diagnostic, run) {
+const publicationReasons = {
+  source_context: 'Некорректный контекст исходного обращения.',
+  trusted_request: 'Запрос не принадлежит доверенному автору.',
+  triage_only: 'Автотриаж допускает только комментарий установленного размера.',
+  issue_only: 'Публикация спецификаций и тикетов доступна только в issues.',
+  specification_context: 'Спецификация недоступна в переданном контексте.',
+  approval: 'Нет подходящего согласования доверенного автора в исходном обсуждении.',
+  changed_payload:
+    'Ответ изменён относительно предыдущей публикации; используйте исходный артефакт.',
+  duplicate_markers: 'Найдены повторные маркеры публикации; требуется проверка созданных issues.',
+  configuration: 'Недоступна обязательная метка ready-for-agent.',
+  github_read: 'Не удалось прочитать данные GitHub.',
+  github_write: 'GitHub не подтвердил операцию записи.',
+  pagination: 'Результат GitHub превысил допустимое количество страниц.',
+  reply_invalid: 'Итоговый ответ не соответствует протоколу публикации.',
+  workflow_context: 'Контекст артефакта не соответствует текущему запуску.',
+  artifact_read: 'Не удалось прочитать артефакты публикации.',
+  unknown: 'Не удалось завершить публикацию по неизвестной причине.',
+}
+
+export function failureNotice(diagnostic, run, previousPublicationUnknown = false) {
+  const notice = buildFailureNotice(diagnostic, run)
+  return previousPublicationUnknown
+    ? notice.replace(
+        'Публикация не начиналась.',
+        'Публикация могла начаться в предыдущем прогоне. При частичной публикации повторите прогон с исходным артефактом; созданные issues сохраняются.',
+      )
+    : notice
+}
+
+function buildFailureNotice(diagnostic, run) {
   const code = validDiagnostic(diagnostic) ? diagnostic.code : 'unknown'
+  if (code === 'publication') {
+    const state =
+      diagnostic.details.state === 'none'
+        ? 'Публикация не начиналась.'
+        : 'Публикация могла начаться, в том числе в предыдущем прогоне. Повторите прогон с исходным артефактом; созданные issues сохраняются.'
+    return `${publicationReasons[diagnostic.details.reason]} ${state} [Actions](${run})`
+  }
   if (code === 'reply_schema' && diagnostic.version === 3)
     return `${schemaReasons[diagnostic.details.reason]} «${diagnostic.details.field}». Публикация не начиналась. [Actions](${run})`
   if (code === 'reply_json')

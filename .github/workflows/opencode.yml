@@ -146,16 +146,20 @@ jobs:
             const run = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const issue_number = context.payload.issue?.number ?? context.payload.pull_request.number;
             const { pathToFileURL } = require('node:url');
-            const { failureNotice } = await import(pathToFileURL(path.resolve('scripts/opencode-diagnostic.mjs')).href);
+            const { failureNotice, diagnosticFor, DiagnosticError } = await import(pathToFileURL(path.resolve('scripts/opencode-diagnostic.mjs')).href);
+            const readArtifact = async (directory, name) => {
+              try { return JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, directory, name), 'utf8')); }
+              catch { throw new DiagnosticError('publication', { reason: 'artifact_read', state: 'unknown' }); }
+            };
             try {
               if (process.env.ANSWER_RESULT !== 'success') throw new Error('Model job failed');
-              const prepared = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-context', 'context.json'), 'utf8'));
+              const prepared = await readArtifact('opencode-context', 'context.json');
               const automatic = context.eventName === 'issues';
               const requestId = automatic ? context.payload.issue.id : context.payload.comment.id;
               if (prepared.number !== issue_number || prepared.requestId !== requestId ||
                   (prepared.mode === 'triage') !== automatic ||
-                  prepared.repository !== `${context.repo.owner}/${context.repo.repo}`) throw new Error('Context mismatch');
-              const reply = JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, 'opencode-reply', 'reply.json'), 'utf8'));
+                  prepared.repository !== `${context.repo.owner}/${context.repo.repo}`) throw new DiagnosticError('publication', { reason: 'workflow_context', state: 'unknown' });
+              const reply = await readArtifact('opencode-reply', 'reply.json');
               const { publish } = await import(pathToFileURL(path.resolve('scripts/opencode-publish.mjs')).href);
               const api = async (method, route, data = {}) => {
                 const response = await github.request(`${method} /repos/{owner}/{repo}${route}`, { ...context.repo, ...data });
@@ -163,7 +167,7 @@ jobs:
               };
               await publish(reply, prepared, api, run);
             } catch (error) {
-              let diagnostic;
+              let diagnostic = diagnosticFor(error);
               if (process.env.ANSWER_RESULT !== 'success') {
                 try {
                   const file = path.join(process.env.RUNNER_TEMP, 'opencode-diagnostic', 'diagnostic.json');
@@ -171,7 +175,7 @@ jobs:
                 } catch {}
               }
               await github.rest.issues.createComment({ ...context.repo, issue_number,
-                body: failureNotice(diagnostic, run) });
+                body: failureNotice(diagnostic, run, process.env.ANSWER_RESULT !== 'success') });
               core.setFailed('OpenCode preparation or publication failed.');
             }
 
