@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.4.0](https://github.com/MeNn13/ai-for-developers-project-387/compare/v0.3.0...v0.4.0) (2026-11-14)
+
+
+### Features
+
+* **ci:** add automatic issue triage ([d1397e5](https://github.com/MeNn13/ai-for-developers-project-387/commit/d1397e59a5a6245e1f2d92d1c2713f28aa7d4211))
+* **ci:** add automatic issue triage ([6c97d4f](https://github.com/MeNn13/ai-for-developers-project-387/commit/6c97d4ff16536eccb6dc3724be1cd5c59776a67d))
+* **ci:** add OpenCode discussion workflow ([f650dfd](https://github.com/MeNn13/ai-for-developers-project-387/commit/f650dfdcab2e7ea487d1ee5b7c413bf6e929b390))
+* **ci:** add OpenCode discussion workflow ([#6](https://github.com/MeNn13/ai-for-developers-project-387/issues/6)) ([a51985d](https://github.com/MeNn13/ai-for-developers-project-387/commit/a51985d38d51608ad73e09bc292e7b97327bbce3))
+* **ci:** diagnose publication and recovery failures ([#27](https://github.com/MeNn13/ai-for-developers-project-387/issues/27)) ([d08065d](https://github.com/MeNn13/ai-for-developers-project-387/commit/d08065d1e3c758cd10bd2dcfb276e745839fda0b))
+* **ci:** explain OpenCode preparation failures ([#26](https://github.com/MeNn13/ai-for-developers-project-387/issues/26)) ([ae33186](https://github.com/MeNn13/ai-for-developers-project-387/commit/ae3318611bb11eea0a1e12b749d6038f40a4006b))
+* **ci:** publish opencode specifications and tickets ([dc695f5](https://github.com/MeNn13/ai-for-developers-project-387/commit/dc695f5a9470c90929f22c58d484bfb12db630a9))
+* **ci:** publish opencode specifications and tickets ([#10](https://github.com/MeNn13/ai-for-developers-project-387/issues/10)) ([9cdc022](https://github.com/MeNn13/ai-for-developers-project-387/commit/9cdc022d162fd41e644ca1e95e7e06acd2886d9f))
+
+
+### Bug Fixes
+
+* **ci:** accept markdown replies in automatic triage ([86e6576](https://github.com/MeNn13/ai-for-developers-project-387/commit/86e6576797d56b59aaa644e9ab840a139e1a3c12))
+* **ci:** accept markdown replies in automatic triage ([d3446cd](https://github.com/MeNn13/ai-for-developers-project-387/commit/d3446cd20aebd5f4f4c00e8718c4037a18619d8c))
+* **ci:** add safe JSON reply diagnostics ([9e95476](https://github.com/MeNn13/ai-for-developers-project-387/commit/9e95476d6837c1de217036d0a903e42c973337b2))
+* **ci:** add safe JSON reply diagnostics ([#16](https://github.com/MeNn13/ai-for-developers-project-387/issues/16)) ([07b203a](https://github.com/MeNn13/ai-for-developers-project-387/commit/07b203aa933eb950acbded6d18e025dd41d77e36))
+* **ci:** bound playwright dependency installation ([#10](https://github.com/MeNn13/ai-for-developers-project-387/issues/10)) ([1c0dccd](https://github.com/MeNn13/ai-for-developers-project-387/commit/1c0dccd31b983a733d59ad81cde350c7fd266520))
+* **ci:** diagnose and validate OpenCode responses ([1927554](https://github.com/MeNn13/ai-for-developers-project-387/commit/1927554fbe314c08ba6479761ef81174cb883061))
+* **ci:** diagnose and validate OpenCode responses ([#13](https://github.com/MeNn13/ai-for-developers-project-387/issues/13)) ([cfd5610](https://github.com/MeNn13/ai-for-developers-project-387/commit/cfd56109288b4912b59162ed3a9f480b31e4575a))
+* **ci:** diagnose reply schema validation failures ([36d7a4b](https://github.com/MeNn13/ai-for-developers-project-387/commit/36d7a4ba4806ef804e44b69ba1694072d27948b3))
+* **ci:** diagnose reply schema validation failures ([#18](https://github.com/MeNn13/ai-for-developers-project-387/issues/18)) ([3fd16f4](https://github.com/MeNn13/ai-for-developers-project-387/commit/3fd16f4ebc333514a9b9731bb0d528d27aa14c9e))
+* **ci:** harden OpenCode publication protocol ([ccab174](https://github.com/MeNn13/ai-for-developers-project-387/commit/ccab174ea131616f58d2ae3574af4f58ffaa3a40))
+* **ci:** reject coerced diagnostic scalars ([#24](https://github.com/MeNn13/ai-for-developers-project-387/issues/24)) ([cc6b281](https://github.com/MeNn13/ai-for-developers-project-387/commit/cc6b2812332fcd50ffa499f49a9b72d72a4309f6))
+* **ci:** require blocker arrays in model instructions ([0070ce9](https://github.com/MeNn13/ai-for-developers-project-387/commit/0070ce9422cedd5b760d2b84e4b045a7aca5886a))
+* **ci:** require blocker arrays in model instructions ([#20](https://github.com/MeNn13/ai-for-developers-project-387/issues/20)) ([5275ed8](https://github.com/MeNn13/ai-for-developers-project-387/commit/5275ed83948e2a9d29351748d9a89a5c35c8e824))
+* **web:** keep mobile booking controls visible ([#22](https://github.com/MeNn13/ai-for-developers-project-387/issues/22)) ([2483a64](https://github.com/MeNn13/ai-for-developers-project-387/commit/2483a64d44063b6ed84ea11aa416c3992cc330cb))
+* **web:** scope confirmation wrapping to mobile ([#15](https://github.com/MeNn13/ai-for-developers-project-387/issues/15)) ([494fd65](https://github.com/MeNn13/ai-for-developers-project-387/commit/494fd658181084edc7803f4274efd57d2a2b914e))
+* **web:** show upcoming meetings as mobile cards ([#23](https://github.com/MeNn13/ai-for-developers-project-387/issues/23)) ([6472556](https://github.com/MeNn13/ai-for-developers-project-387/commit/647255689d002bbe797d2500d180c8458eccb3b5))
+* **web:** support mobile booking and owner pages ([ba65538](https://github.com/MeNn13/ai-for-developers-project-387/commit/ba65538c3e36b36d5d7b89d7f875b8cd0a780367))
+* **web:** wrap mobile confirmation and verify edge states ([#15](https://github.com/MeNn13/ai-for-developers-project-387/issues/15)) ([cea6d6f](https://github.com/MeNn13/ai-for-developers-project-387/commit/cea6d6f79bf6921eac111227f16f9cbe684d8fb4))
+
 ## [0.3.0](https://github.com/MeNn13/ai-for-developers-project-386/compare/v0.2.1...v0.3.0) (2026-11-08)
 
 
