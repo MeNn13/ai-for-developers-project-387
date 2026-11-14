@@ -21,6 +21,8 @@ export class DiagnosticError extends Error {
     this.diagnostic = { version: 1, code, stage: categories[code][0] }
     if (['reply_json', 'reply_schema'].includes(code) && details !== undefined)
       this.diagnostic = { version: 2, code, stage: 'reply', details }
+    if (code === 'reply_schema' && details?.reason !== undefined)
+      this.diagnostic = { version: 3, code, stage: 'reply', details }
   }
 }
 
@@ -52,6 +54,15 @@ function validDiagnostic(value) {
   )
     return false
   if (value.version === 1) return exactKeys(value, 'version,code,stage')
+  if (value.version === 3)
+    return (
+      exactKeys(value, 'version,code,stage,details') &&
+      value.code === 'reply_schema' &&
+      exactKeys(value.details, 'rule,field,reason') &&
+      Object.hasOwn(schemaFields, value.details.rule) &&
+      schemaFields[value.details.rule].includes(value.details.field) &&
+      Object.hasOwn(schemaReasons, value.details.reason)
+    )
   if (value.version !== 2 || !exactKeys(value, 'version,code,stage,details')) return false
   const details = value.details
   if (value.code === 'reply_schema')
@@ -98,8 +109,33 @@ function validDiagnostic(value) {
   )
 }
 
+const schemaFields = {
+  version_comment: ['reply', 'version', 'comment'],
+  publication_kind: ['publication', 'kind'],
+  publication_items: ['items'],
+  spec_item_count: ['items'],
+  ticket_references: ['spec', 'approvalComment'],
+  item_key: ['item', 'key'],
+  item_text: ['title', 'body'],
+  item_blockers: ['blockedBy'],
+  blocker_order: ['blockedBy'],
+  spec_blockers: ['blockedBy'],
+}
+const schemaReasons = {
+  missing: 'Отсутствует обязательное поле',
+  type: 'Неверный тип поля',
+  empty: 'Пустое значение поля',
+  too_long: 'Превышен допустимый размер поля',
+  invalid: 'Недопустимое значение поля',
+  duplicate_key: 'Повтор ключа в поле',
+  duplicate_dependency: 'Повтор зависимости в поле',
+  reference: 'Ссылка ведёт не на ранее перечисленный элемент в поле',
+}
+
 export function failureNotice(diagnostic, run) {
   const code = validDiagnostic(diagnostic) ? diagnostic.code : 'unknown'
+  if (code === 'reply_schema' && diagnostic.version === 3)
+    return `${schemaReasons[diagnostic.details.reason]} «${diagnostic.details.field}». Публикация не начиналась. [Actions](${run})`
   if (code === 'reply_json')
     return `Не удалось разобрать итоговый ответ модели как JSON. Публикация не начиналась. Код reply_json; безопасные сведения — в артефакте opencode-diagnostic. Передайте ссылку на прогон для диагностики. [Actions](${run})`
   if (code === 'reply_schema')

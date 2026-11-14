@@ -71,54 +71,78 @@ export function protocolInstruction() {
   ].join('\n')
 }
 
-function text(value, limit) {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= limit
-}
-
 export class ReplyValidationError extends Error {
-  constructor(rule) {
+  constructor(rule, field, reason) {
     super('Invalid OpenCode reply schema')
     this.rule = rule
+    this.field = field
+    this.reason = reason
   }
 }
-
-function requireReply(condition, rule) {
-  if (!condition) throw new ReplyValidationError(rule)
+function requireReply(condition, rule, field, reason = 'invalid') {
+  if (!condition) throw new ReplyValidationError(rule, field, reason)
 }
-
+function typed(value, type, rule, field) {
+  requireReply(value !== undefined, rule, field, 'missing')
+  requireReply(
+    type === 'array'
+      ? Array.isArray(value)
+      : type === 'object'
+        ? value !== null && typeof value === 'object' && !Array.isArray(value)
+        : typeof value === type,
+    rule,
+    field,
+    'type',
+  )
+}
+function text(value, limit, rule, field) {
+  typed(value, 'string', rule, field)
+  requireReply(value.trim().length > 0, rule, field, 'empty')
+  requireReply(value.length <= limit, rule, field, 'too_long')
+}
 export function validateReply(reply) {
-  requireReply(reply?.version === 1 && text(reply.comment, limits.comment), 'version_comment')
+  typed(reply, 'object', 'version_comment', 'reply')
+  typed(reply.version, 'number', 'version_comment', 'version')
+  requireReply(reply.version === 1, 'version_comment', 'version')
+  text(reply.comment, limits.comment, 'version_comment', 'comment')
   const publication = reply.publication
   if (publication == null) return
-  requireReply(['spec', 'tickets'].includes(publication.kind), 'publication_kind')
-  requireReply(
-    Array.isArray(publication.items) &&
-      publication.items.length > 0 &&
-      publication.items.length <= limits.items,
-    'publication_items',
-  )
-  if (publication.kind === 'spec') requireReply(publication.items.length === 1, 'spec_item_count')
+  typed(publication, 'object', 'publication_kind', 'publication')
+  typed(publication.kind, 'string', 'publication_kind', 'kind')
+  requireReply(['spec', 'tickets'].includes(publication.kind), 'publication_kind', 'kind')
+  typed(publication.items, 'array', 'publication_items', 'items')
+  requireReply(publication.items.length > 0, 'publication_items', 'items', 'empty')
+  requireReply(publication.items.length <= limits.items, 'publication_items', 'items', 'too_long')
+  if (publication.kind === 'spec')
+    requireReply(publication.items.length === 1, 'spec_item_count', 'items')
   else
-    requireReply(
-      positive(publication.spec) && positive(publication.approvalComment),
-      'ticket_references',
-    )
+    for (const field of ['spec', 'approvalComment']) {
+      typed(publication[field], 'number', 'ticket_references', field)
+      requireReply(positive(publication[field]), 'ticket_references', field)
+    }
   const keys = new Set()
   for (const item of publication.items) {
+    typed(item, 'object', 'item_key', 'item')
+    typed(item.key, 'string', 'item_key', 'key')
+    requireReply(item.key.length > 0, 'item_key', 'key', 'empty')
+    requireReply(item.key.length <= 40, 'item_key', 'key', 'too_long')
+    requireReply(keyPattern.test(item.key), 'item_key', 'key')
+    requireReply(!keys.has(item.key), 'item_key', 'key', 'duplicate_key')
+    text(item.title, limits.title, 'item_text', 'title')
+    text(item.body, limits.body, 'item_text', 'body')
+    typed(item.blockedBy, 'array', 'item_blockers', 'blockedBy')
     requireReply(
-      typeof item.key === 'string' && keyPattern.test(item.key) && !keys.has(item.key),
-      'item_key',
-    )
-    requireReply(text(item.title, limits.title) && text(item.body, limits.body), 'item_text')
-    requireReply(
-      Array.isArray(item.blockedBy) && new Set(item.blockedBy).size === item.blockedBy.length,
+      new Set(item.blockedBy).size === item.blockedBy.length,
       'item_blockers',
+      'blockedBy',
+      'duplicate_dependency',
     )
-    requireReply(
-      item.blockedBy.every((key) => keys.has(key)),
-      'blocker_order',
-    )
-    if (publication.kind === 'spec') requireReply(item.blockedBy.length === 0, 'spec_blockers')
+    for (const key of item.blockedBy) {
+      typed(key, 'string', 'blocker_order', 'blockedBy')
+      requireReply(keys.has(key), 'blocker_order', 'blockedBy', 'reference')
+    }
+    if (publication.kind === 'spec')
+      requireReply(item.blockedBy.length === 0, 'spec_blockers', 'blockedBy')
     keys.add(item.key)
   }
 }

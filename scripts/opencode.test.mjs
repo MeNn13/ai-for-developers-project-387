@@ -35,6 +35,18 @@ test('workflow failure notice posts only a safe comment for missing, invalid and
         stage: 'reply',
         details: { rule: 'item_key' },
       }),
+      JSON.stringify({
+        version: 3,
+        code: 'reply_schema',
+        stage: 'reply',
+        details: { rule: 'item_blockers', field: 'blockedBy', reason: 'missing' },
+      }),
+      JSON.stringify({
+        version: 3,
+        code: 'reply_schema',
+        stage: 'reply',
+        details: { rule: 'item_blockers', field: 'blockedBy', reason: 'fake-secret' },
+      }),
     ]) {
       const file = join(directory, 'opencode-diagnostic', 'diagnostic.json')
       if (value === null) await rm(file, { force: true })
@@ -62,7 +74,9 @@ test('workflow failure notice posts only a safe comment for missing, invalid and
       assert.doesNotMatch(comments[0].body, /fake-secret/)
       assert.match(
         comments[0].body,
-        value?.startsWith('{') ? /Публикация не начиналась/ : /При частичной публикации/,
+        value?.startsWith('{') && !value.includes('fake-secret')
+          ? /Публикация не начиналась/
+          : /При частичной публикации/,
       )
     }
   } finally {
@@ -110,10 +124,10 @@ test('schema failure reports a fixed rule without retaining model data', () => {
     () => resultReply(answerStream('{"comment":"fake-secret"}')),
     (error) => {
       assert.deepEqual(diagnosticFor(error), {
-        version: 2,
+        version: 3,
         code: 'reply_schema',
         stage: 'reply',
-        details: { rule: 'version_comment' },
+        details: { rule: 'version_comment', field: 'version', reason: 'missing' },
       })
       assert.doesNotMatch(JSON.stringify(error), /fake-secret/)
       return true
@@ -140,18 +154,15 @@ test('schema rules identify the first failed validation and preserve valid repli
     [spec([{ ...item, blockedBy: 'task' }]), 'item_blockers'],
     [spec([{ ...item, blockedBy: ['task', 'task'] }]), 'item_blockers'],
     [spec([{ ...item, blockedBy: ['fake-secret'] }]), 'blocker_order'],
-    [spec([null]), 'schema_other'],
+    [spec([null]), 'item_key'],
   ]
   for (const [reply, rule] of cases) {
     assert.throws(
       () => resultReply(answerStream(JSON.stringify(reply))),
       (error) => {
-        assert.deepEqual(diagnosticFor(error), {
-          version: 2,
-          code: 'reply_schema',
-          stage: 'reply',
-          details: { rule },
-        })
+        assert.equal(diagnosticFor(error).version, 3)
+        assert.equal(diagnosticFor(error).code, 'reply_schema')
+        assert.equal(diagnosticFor(error).details.rule, rule)
         assert.doesNotMatch(JSON.stringify(error), /fake-secret/)
         return true
       },
@@ -429,6 +440,35 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
       ['fake-key-private-context', 'stream_json'],
       [answerStream('fake-key-private-context'), 'reply_json'],
       [answerStream('{"secret":"fake-key-private-context"}'), 'reply_schema'],
+      ...[
+        { key: 'second', title: 'Title', body: 'fake-key-private-context' },
+        { key: 'second', title: 'Title', body: 'fake-key-private-context', blockedBy: null },
+        { key: 'second', title: '', body: 'fake-key-private-context', blockedBy: [] },
+        { key: 'second', title: 'x'.repeat(201), body: 'fake-key-private-context', blockedBy: [] },
+        { key: 'invalid key', title: 'Title', body: 'fake-key-private-context', blockedBy: [] },
+        { key: 'first', title: 'Title', body: 'fake-key-private-context', blockedBy: [] },
+        {
+          key: 'second',
+          title: 'Title',
+          body: 'fake-key-private-context',
+          blockedBy: ['first', 'first'],
+        },
+        { key: 'second', title: 'Title', body: 'fake-key-private-context', blockedBy: ['unknown'] },
+      ].map((item) => [
+        answerStream(
+          JSON.stringify({
+            version: 1,
+            comment: 'Answer',
+            publication: {
+              kind: 'tickets',
+              spec: 12,
+              approvalComment: 40,
+              items: [{ key: 'first', title: 'Title', body: 'Body', blockedBy: [] }, item],
+            },
+          }),
+        ),
+        'reply_schema',
+      ]),
       [answerStream('{}', 'length'), 'incomplete'],
       [
         JSON.stringify({ type: 'error', error: { message: 'fake-key-private-context' } }),
@@ -471,10 +511,11 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
         assert.ok(Buffer.byteLength(diagnostic) <= 1024)
         assert.equal(
           JSON.parse(diagnostic).version,
-          ['reply_json', 'reply_schema'].includes(code) ? 2 : 1,
+          code === 'reply_schema' ? 3 : code === 'reply_json' ? 2 : 1,
         )
-        if (code === 'reply_schema')
-          assert.equal(JSON.parse(diagnostic).details.rule, 'version_comment')
+        if (code === 'reply_schema') {
+          assert.match(failureNotice(JSON.parse(diagnostic), 'run'), /Публикация не начиналась/)
+        }
         assert.doesNotMatch(
           diagnostic + failureNotice(JSON.parse(diagnostic), 'run'),
           /fake-key-private-context/,

@@ -264,7 +264,9 @@ export function resultReply(stream) {
     validateReply(reply)
   } catch (error) {
     throw new DiagnosticError('reply_schema', {
-      rule: error instanceof ReplyValidationError ? error.rule : 'schema_other',
+      ...(error instanceof ReplyValidationError
+        ? { rule: error.rule, field: error.field, reason: error.reason }
+        : { rule: 'schema_other' }),
     })
   }
   return reply
