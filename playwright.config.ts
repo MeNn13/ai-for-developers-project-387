@@ -10,7 +10,7 @@ export default defineConfig({
   outputDir: 'artifacts/e2e/results',
   use: {
     baseURL: 'http://127.0.0.1:5187',
-    trace: 'retain-on-failure',
+    trace: process.env.PLAYWRIGHT_TRACE === 'on' ? 'on' : 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
   },
