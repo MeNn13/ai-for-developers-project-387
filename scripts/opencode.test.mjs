@@ -28,6 +28,12 @@ test('workflow failure notice posts only a safe comment for missing, invalid and
     for (const value of [
       null,
       'not JSON fake-secret',
+      JSON.stringify({
+        version: 3,
+        code: 'publication',
+        stage: 'publish',
+        details: { reason: ['github_write'], state: 'possible' },
+      }),
       JSON.stringify({ version: 1, code: 'reply_json', stage: 'reply' }),
       JSON.stringify({
         version: 2,

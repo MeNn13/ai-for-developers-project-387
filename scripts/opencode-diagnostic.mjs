@@ -60,6 +60,8 @@ function validDiagnostic(value) {
       value.version === 3 &&
       exactKeys(value, 'version,code,stage,details') &&
       exactKeys(value.details, 'reason,state') &&
+      typeof value.details.reason === 'string' &&
+      typeof value.details.state === 'string' &&
       Object.hasOwn(publicationReasons, value.details.reason) &&
       ['none', 'possible', 'unknown'].includes(value.details.state)
     )
@@ -69,6 +71,9 @@ function validDiagnostic(value) {
       exactKeys(value, 'version,code,stage,details') &&
       value.code === 'reply_schema' &&
       exactKeys(value.details, 'rule,field,reason') &&
+      typeof value.details.rule === 'string' &&
+      typeof value.details.field === 'string' &&
+      typeof value.details.reason === 'string' &&
       Object.hasOwn(schemaFields, value.details.rule) &&
       schemaFields[value.details.rule].includes(value.details.field) &&
       Object.hasOwn(schemaReasons, value.details.reason)

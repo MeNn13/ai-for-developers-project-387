@@ -20,10 +20,45 @@ test('publication diagnostic parsing rejects unknown data and bounds safe output
     { ...diagnostic, extra: 'fake-secret' },
     { ...diagnostic, details: { ...diagnostic.details, status: 'fake-secret' } },
     { ...diagnostic, details: { ...diagnostic.details, reason: 'fake-secret' } },
+    { ...diagnostic, details: { ...diagnostic.details, reason: ['github_write'] } },
     { ...diagnostic, details: { ...diagnostic.details, state: 'fake-secret' } },
   ]) {
     assert.match(failureNotice(bad, 'run'), /При частичной публикации/)
     assert.doesNotMatch(failureNotice(bad, 'run'), /fake-secret|Публикация не начиналась/)
+  }
+})
+
+test('remaining publication preflight failures expose fixed reasons without writes or leaks', async () => {
+  for (const reason of ['source_context', 'duplicate_markers', 'github_read', 'pagination']) {
+    const fixture = githubFixture()
+    if (reason === 'duplicate_markers') {
+      await publish(reply, context, fixture.api, 'run')
+      fixture.issues.push({ ...fixture.issues[0], number: 99 })
+    }
+    const writesBefore = fixture.calls.filter((call) => call.method === 'POST').length
+    const api = async (method, path, data) => {
+      if (path.startsWith('/issues?') && reason === 'github_read')
+        throw new Error('fake-secret GitHub response')
+      if (path.startsWith('/issues?') && reason === 'pagination')
+        return Array.from({ length: 100 }, () => ({ number: 1, body: 'fake-secret' }))
+      return fixture.api(method, path, data)
+    }
+    await assert.rejects(
+      publish(reply, reason === 'source_context' ? { ...context, number: 0 } : context, api, 'run'),
+      (error) => {
+        const diagnostic = diagnosticFor(error)
+        assert.deepEqual(diagnostic, {
+          version: 3,
+          code: 'publication',
+          stage: 'publish',
+          details: { reason, state: reason === 'duplicate_markers' ? 'possible' : 'unknown' },
+        })
+        assert.match(failureNotice(diagnostic, 'run'), /могла начаться/)
+        assert.doesNotMatch(JSON.stringify(error) + failureNotice(diagnostic, 'run'), /fake-secret/)
+        return true
+      },
+    )
+    assert.equal(fixture.calls.filter((call) => call.method === 'POST').length, writesBefore)
   }
 })
 
@@ -83,42 +118,59 @@ test('workflow reports publication failures safely and keeps the run failed', as
     process.env.ANSWER_RESULT = 'success'
     await mkdir(join(directory, 'opencode-context'))
     await mkdir(join(directory, 'opencode-reply'))
-    await writeFile(join(directory, 'opencode-context/context.json'), JSON.stringify(context))
-    await writeFile(join(directory, 'opencode-reply/reply.json'), JSON.stringify(reply))
-    const fixture = githubFixture()
-    const comments = [],
-      failures = []
-    const execute = new (Object.getPrototypeOf(async function () {}).constructor)(
-      'require',
-      'context',
-      'github',
-      'core',
-      source,
-    )
-    await execute(
-      createRequire(import.meta.url),
-      {
-        repo: { owner: 'MeNn13', repo: 'ai-for-developers-project-387' },
-        runId: 1,
-        eventName: 'issue_comment',
-        payload: { issue: { number: 9 }, comment: { id: 40 } },
-      },
-      {
-        request: async (route, data) => {
-          const [method, path] = route.split(' /repos/{owner}/{repo}')
-          const result = await fixture.api(method, path, data)
-          if (method === 'POST') throw new Error('fake-secret GitHub body')
-          return { data: result }
+    for (const [prepared, answer, explanation, issueCount] of [
+      [JSON.stringify(context), JSON.stringify(reply), /GitHub не подтвердил операцию записи/, 1],
+      [
+        JSON.stringify({ ...context, requestId: 999 }),
+        JSON.stringify(reply),
+        /Контекст артефакта не соответствует текущему запуску/,
+        0,
+      ],
+      [
+        JSON.stringify(context),
+        'fake-secret invalid JSON',
+        /Не удалось прочитать артефакты публикации/,
+        0,
+      ],
+    ]) {
+      await writeFile(join(directory, 'opencode-context/context.json'), prepared)
+      await writeFile(join(directory, 'opencode-reply/reply.json'), answer)
+      const fixture = githubFixture()
+      const comments = [],
+        failures = []
+      const execute = new (Object.getPrototypeOf(async function () {}).constructor)(
+        'require',
+        'context',
+        'github',
+        'core',
+        source,
+      )
+      await execute(
+        createRequire(import.meta.url),
+        {
+          repo: { owner: 'MeNn13', repo: 'ai-for-developers-project-387' },
+          runId: 1,
+          eventName: 'issue_comment',
+          payload: { issue: { number: 9 }, comment: { id: 40 } },
         },
-        rest: { issues: { createComment: async (comment) => comments.push(comment) } },
-      },
-      { setFailed: (message) => failures.push(message) },
-    )
-    assert.equal(failures.length, 1)
-    assert.equal(comments.length, 1)
-    assert.match(comments[0].body, /GitHub не подтвердил операцию записи.*могла начаться/)
-    assert.doesNotMatch(JSON.stringify(comments) + JSON.stringify(failures), /fake-secret/)
-    assert.equal(fixture.issues.length, 1)
+        {
+          request: async (route, data) => {
+            const [method, path] = route.split(' /repos/{owner}/{repo}')
+            const result = await fixture.api(method, path, data)
+            if (method === 'POST') throw new Error('fake-secret GitHub body')
+            return { data: result }
+          },
+          rest: { issues: { createComment: async (comment) => comments.push(comment) } },
+        },
+        { setFailed: (message) => failures.push(message) },
+      )
+      assert.equal(failures.length, 1)
+      assert.equal(comments.length, 1)
+      assert.match(comments[0].body, explanation)
+      assert.match(comments[0].body, /могла начаться/)
+      assert.doesNotMatch(JSON.stringify(comments) + JSON.stringify(failures), /fake-secret/)
+      assert.equal(fixture.issues.length, issueCount)
+    }
   } finally {
     if (before.temp === undefined) delete process.env.RUNNER_TEMP
     else process.env.RUNNER_TEMP = before.temp

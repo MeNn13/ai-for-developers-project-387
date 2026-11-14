@@ -79,6 +79,8 @@ test('v3 diagnostics reject injected fields, unknown reasons and mismatched rule
     { ...good, details: { ...good.details, extra: 'fake-secret' } },
     { ...good, details: { ...good.details, field: 'fake-secret' } },
     { ...good, details: { ...good.details, reason: 'fake-secret' } },
+    { ...good, details: { ...good.details, reason: ['type'] } },
+    { ...good, details: { ...good.details, rule: ['item_blockers'] } },
     { ...good, details: { ...good.details, rule: 'item_key' } },
   ]) {
     assert.match(failureNotice(bad, 'run'), /При частичной публикации/)
