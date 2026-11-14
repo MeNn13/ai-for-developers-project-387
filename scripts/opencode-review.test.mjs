@@ -1,0 +1,130 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import { eligible, prepareReview, publishReview } from './opencode-review.mjs'
+
+const pr = {
+  number: 9,
+  user: { login: 'MeNn13', type: 'User' },
+  author_association: 'OWNER',
+  head: { sha: 'abc', repo: { full_name: 'o/r' } },
+  body: 'Spec #38',
+  title: 'Change',
+}
+test('review starts a fresh CLI session with independent instructions and no publication', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'independent-review-'))
+  try {
+    await writeFile(
+      join(directory, 'context.json'),
+      JSON.stringify({ mode: 'review', head: 'abc' }),
+    )
+    const loader = join(directory, 'loader.mjs')
+    await writeFile(
+      loader,
+      `
+      if (process.argv[1]?.endsWith('run')) {
+        let input = ''; for await (const part of process.stdin) input += part;
+        if (!input.includes('independent PR review') || !input.includes('publication strictly null') ||
+            !process.argv.includes('--standalone') || process.argv.includes('--continue') ||
+            process.env.GH_TOKEN) process.exit(3);
+        console.log(JSON.stringify({ type: 'text', part: { text: JSON.stringify({ version: 1, comment: 'No confirmed defects', publication: null }), messageID: 'r' } }));
+        console.log(JSON.stringify({ type: 'step_finish', part: { reason: 'stop' } }));
+        process.exit(0);
+      }
+    `,
+    )
+    const env = {
+      ...process.env,
+      NODE_OPTIONS: `--import=${pathToFileURL(loader).href}`,
+      OPENCODE_BIN: process.execPath,
+      OPENCODE_IO: directory,
+      OPENCODE_API_KEY: 'fake',
+    }
+    delete env.GH_TOKEN
+    const result = spawnSync(process.execPath, ['scripts/opencode-review.mjs', 'run'], {
+      env,
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(
+      JSON.parse(await readFile(join(directory, 'reply.json'), 'utf8')).publication,
+      null,
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('only trusted same-repository humans and explicitly configured apps enter review', () => {
+  assert.equal(eligible(pr, 'o/r'), true)
+  assert.equal(eligible({ ...pr, head: { repo: { full_name: 'fork/r' } } }, 'o/r'), false)
+  assert.equal(eligible({ ...pr, user: { login: 'unknown[bot]', type: 'Bot' } }, 'o/r'), false)
+  const bot = { ...pr, user: { login: 'implement[bot]', type: 'Bot', id: 123 } }
+  assert.equal(eligible(bot, 'o/r', { login: 'implement[bot]', id: 123 }), true)
+  assert.equal(eligible(bot, 'o/r', { login: 'implement[bot]', id: 124 }), false)
+})
+test('review context includes linked grounds, review discussions, CI and calendar criteria', async () => {
+  const api = async (route, accept) => {
+    if (route === '/pulls/9') return accept ? 'diff' : pr
+    if (route === '/issues/38') return { number: 38, body: 'Approved scope' }
+    if (route.includes('check-runs')) return { check_runs: [{ status: 'in_progress' }] }
+    if (route.includes('/status')) return { state: 'pending' }
+    return []
+  }
+  const context = await prepareReview(pr, 'o/r', api)
+  assert.equal(context.related[0].body, 'Approved scope')
+  assert.equal(context.diff, 'diff')
+  assert.match(context.criteria, /Europe\/Moscow/)
+  assert.match(context.criteria, /атомар/)
+  assert.equal(context.checks.check_runs[0].status, 'in_progress')
+})
+test('publisher rejects publications and stale heads before any write', async () => {
+  const writes = []
+  const api = async (route) =>
+    route === '/pulls/9' ? { ...pr, head: { ...pr.head, sha: 'new' } } : []
+  await assert.rejects(
+    publishReview(
+      { version: 1, comment: 'No defects', publication: null },
+      { mode: 'review', number: 9, head: 'abc', repository: 'o/r' },
+      api,
+      async (...args) => writes.push(args),
+      'run',
+    ),
+  )
+  assert.deepEqual(writes, [])
+})
+
+test('publisher posts one general review comment for the exact head without code mutations', async () => {
+  const writes = []
+  const context = { mode: 'review', number: 9, head: 'abc', repository: 'o/r' }
+  const api = async (route) => (route === '/pulls/9' ? pr : [])
+  const reply = {
+    version: 1,
+    comment: 'Подтверждённых дефектов нет. Проверки ещё выполняются.',
+    publication: null,
+  }
+  await publishReview(
+    reply,
+    context,
+    api,
+    async (...args) => writes.push(args),
+    'https://github.com/o/r/actions/runs/1',
+  )
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0][0], 9)
+  assert.match(writes[0][1], /Подтверждённых дефектов нет/)
+  assert.match(writes[0][1], /independent-review:abc/)
+  await assert.rejects(
+    publishReview(
+      { ...reply, publication: { kind: 'spec' } },
+      context,
+      api,
+      async () => assert.fail('write'),
+      'run',
+    ),
+  )
+})
