@@ -113,7 +113,7 @@ run = "osv-scanner scan source --recursive ."
 run = "betterleaks git --no-banner --redact"
 
 [tasks."audit:links"]
-run = "lychee --no-progress README.md AGENTS.md contract/README.md .github/workflows/README.md"
+run = "lychee --no-progress README.md AGENTS.md contract/README.md .github/workflows/README.md docs/development.md docs/deployment.md docs/github-agent.md"
 
 [tasks.typecheck]
 run = "npm run typecheck --workspace frontend"
