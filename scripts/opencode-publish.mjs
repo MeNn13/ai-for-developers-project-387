@@ -1,3 +1,4 @@
+import { validateReply } from './opencode-protocol.mjs'
 import { createHash } from 'node:crypto'
 
 const bot = (item) => item.user?.login === 'github-actions[bot]' && item.user?.type === 'Bot'
@@ -18,60 +19,6 @@ const positive = (value) => Number.isSafeInteger(value) && value > 0
 
 function requireValid(condition, message) {
   if (!condition) throw new Error(`Invalid OpenCode publication: ${message}`)
-}
-
-function text(value, limit) {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= limit
-}
-
-export class ReplyValidationError extends Error {
-  constructor(rule) {
-    super('Invalid OpenCode reply schema')
-    this.rule = rule
-  }
-}
-
-function requireReply(condition, rule) {
-  if (!condition) throw new ReplyValidationError(rule)
-}
-
-export function validateReply(reply) {
-  requireReply(reply?.version === 1 && text(reply.comment, 500_000), 'version_comment')
-  const publication = reply.publication
-  if (publication == null) return
-  requireReply(['spec', 'tickets'].includes(publication.kind), 'publication_kind')
-  requireReply(
-    Array.isArray(publication.items) &&
-      publication.items.length > 0 &&
-      publication.items.length <= 20,
-    'publication_items',
-  )
-  if (publication.kind === 'spec') requireReply(publication.items.length === 1, 'spec_item_count')
-  else
-    requireReply(
-      positive(publication.spec) && positive(publication.approvalComment),
-      'ticket_references',
-    )
-  const keys = new Set()
-  for (const item of publication.items) {
-    requireReply(
-      typeof item.key === 'string' &&
-        /^[a-z][a-z0-9-]{0,39}$/.test(item.key) &&
-        !keys.has(item.key),
-      'item_key',
-    )
-    requireReply(text(item.title, 200) && text(item.body, 50_000), 'item_text')
-    requireReply(
-      Array.isArray(item.blockedBy) && new Set(item.blockedBy).size === item.blockedBy.length,
-      'item_blockers',
-    )
-    requireReply(
-      item.blockedBy.every((key) => keys.has(key)),
-      'blocker_order',
-    )
-    if (publication.kind === 'spec') requireReply(item.blockedBy.length === 0, 'spec_blockers')
-    keys.add(item.key)
-  }
 }
 
 async function list(api, path) {

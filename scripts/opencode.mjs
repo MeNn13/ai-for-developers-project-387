@@ -1,13 +1,9 @@
+import { validateReply, ReplyValidationError, protocolInstruction } from './opencode-protocol.mjs'
 import { appendFile, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { resolve, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import {
-  trustedHuman,
-  triageEligible,
-  validateReply,
-  ReplyValidationError,
-} from './opencode-publish.mjs'
+import { trustedHuman, triageEligible } from './opencode-publish.mjs'
 import { DiagnosticError, diagnosticFor } from './opencode-diagnostic.mjs'
 
 const model = 'opencode/glm-5.3-flash-free'
@@ -287,6 +283,7 @@ async function run(directory) {
   } catch {
     throw new DiagnosticError('file_read')
   }
+  if (!automatic) prompt += `\n\n${protocolInstruction()}`
   const child = spawn(
     process.env.OPENCODE_BIN ?? 'opencode',
     [
