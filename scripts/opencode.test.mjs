@@ -397,8 +397,11 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
       fake,
       `
       if (process.argv[1]?.endsWith('run')) {
-        process.stdin.resume();
+        let prompt = '';
+        process.stdin.setEncoding('utf8');
+        process.stdin.on('data', chunk => prompt += chunk);
         await new Promise(() => process.stdin.on('end', () => {
+          if (process.env.EXPECT_PROTOCOL === 'yes' && !prompt.includes('500000 UTF-16')) process.exit(9);
           process.stderr.write('fake-key-private-context');
           process.stdout.write(process.env.FAKE_STREAM, () => process.exit(0));
         }));
@@ -457,6 +460,7 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
           OPENCODE_BIN: process.execPath,
           OPENCODE_IO: directory,
           OPENCODE_API_KEY: 'fake-key-private-context',
+          EXPECT_PROTOCOL: mode === 'triage' ? 'no' : 'yes',
         },
       })
       assert.equal(result.status, code ? 1 : 0, result.stderr)
