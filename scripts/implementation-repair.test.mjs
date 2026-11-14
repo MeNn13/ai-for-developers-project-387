@@ -172,3 +172,57 @@ test('candidate materializes additions and deletions at the exact commit checked
   assert.equal(readFileSync(join(dir, reply.files[0].path), 'utf8'), reply.files[0].content)
   assert.equal(git('status', '--porcelain', '--untracked-files=no'), '')
 })
+
+test('contract repair runs the trusted project generator and includes its output in the candidate', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'repair-generation-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim()
+  git('init', '--quiet')
+  git('config', 'user.name', 'Fixture')
+  git('config', 'user.email', 'fixture@example.test')
+  git('config', 'core.autocrlf', 'false')
+  mkdirSync(join(dir, 'contract'), { recursive: true })
+  mkdirSync(join(dir, 'scripts'))
+  writeFileSync(join(dir, 'contract/main.tsp'), 'original')
+  writeFileSync(
+    join(dir, 'scripts/generate.mjs'),
+    `import {mkdirSync,writeFileSync,readFileSync} from 'node:fs'; import assert from 'node:assert/strict'; assert.equal(readFileSync('contract/main.tsp','utf8'),'changed contract'); mkdirSync('frontend/src/api/generated',{recursive:true}); writeFileSync('frontend/src/api/generated/model.ts','export const generated = true\\n');`,
+  )
+  git('add', '.')
+  git('commit', '--quiet', '-m', 'test: prepare generator fixture')
+  const base = git('rev-parse', 'HEAD')
+  const io = join(dir, 'io')
+  mkdirSync(io)
+  writeFileSync(
+    join(io, 'context.json'),
+    JSON.stringify({
+      tickets: [41],
+      expectedHead: base,
+      trustedSha: base,
+      commitDate: '2026-11-15T00:00:00Z',
+    }),
+  )
+  writeFileSync(
+    join(io, 'reply.json'),
+    JSON.stringify({
+      ...reply,
+      files: [{ path: 'contract/main.tsp', mode: '100644', content: 'changed contract' }],
+    }),
+  )
+  const candidate = spawnSync(
+    process.execPath,
+    [join(import.meta.dirname, 'implementation-repair.mjs'), 'candidate'],
+    { cwd: dir, env: { ...process.env, REPAIR_IO: io }, encoding: 'utf8' },
+  )
+  assert.equal(candidate.status, 0, candidate.stderr)
+  const result = JSON.parse(readFileSync(join(io, 'result.json')))
+  assert.equal(
+    result.files.find((f) => f.path === 'frontend/src/api/generated/model.ts').content,
+    'export const generated = true\n',
+  )
+  assert.equal(
+    git('show', 'HEAD:frontend/src/api/generated/model.ts'),
+    'export const generated = true',
+  )
+  assert.equal(git('rev-parse', 'HEAD'), result.candidateSha)
+})
