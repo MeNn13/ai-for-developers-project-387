@@ -1,0 +1,91 @@
+name: implementation-publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Successful trusted implementation run ID
+        required: true
+        type: string
+      previous_run:
+        description: Publisher run with last publication receipt (empty for new branch)
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: implementation-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && github.actor == 'MeNn13'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: implementation-publisher
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate run identifiers
+        env:
+          SOURCE: ${{ inputs.source_run }}
+          PREVIOUS: ${{ inputs.previous_run }}
+        run: |
+          [[ "$SOURCE" =~ ^[1-9][0-9]*$ ]]
+          [[ -z "$PREVIOUS" || "$PREVIOUS" =~ ^[1-9][0-9]*$ ]]
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: implementation-context
+          path: ${{ runner.temp }}/implementation/context
+          run-id: ${{ inputs.source_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: implementation-result
+          path: ${{ runner.temp }}/implementation/result
+          run-id: ${{ inputs.source_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: implementation-verification
+          path: ${{ runner.temp }}/implementation/verification
+          run-id: ${{ inputs.source_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.previous_run != ''
+        with:
+          name: implementation-publication
+          path: ${{ runner.temp }}/implementation/previous
+          run-id: ${{ inputs.previous_run }}
+          github-token: ${{ github.token }}
+      - name: Mint repository-scoped installation token
+        id: installation
+        run: node scripts/implementation-app.mjs
+        env:
+          PUBLISH_APP_ID: ${{ vars.PUBLISH_APP_ID }}
+          PUBLISH_INSTALLATION_ID: ${{ vars.PUBLISH_INSTALLATION_ID }}
+          PUBLISH_APP_PRIVATE_KEY: ${{ secrets.PUBLISH_APP_PRIVATE_KEY }}
+      - name: Validate and publish data through fixed GitHub operations
+        run: node scripts/implementation-publish.mjs
+        env:
+          PUBLISH_IO: ${{ runner.temp }}/implementation
+          TRUSTED_SHA: ${{ github.sha }}
+          SOURCE_RUN_ID: ${{ inputs.source_run }}
+          PREVIOUS_RUN_ID: ${{ inputs.previous_run }}
+          PUBLISH_APP_BOT_ID: ${{ vars.PUBLISH_APP_BOT_ID }}
+      - name: Revoke installation token
+        if: always() && steps.installation.outcome == 'success'
+        run: node scripts/implementation-app.mjs revoke
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: implementation-publication
+          path: ${{ runner.temp }}/implementation/publication.json
+          if-no-files-found: ignore
+          retention-days: 7
