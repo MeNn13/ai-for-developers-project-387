@@ -24,6 +24,7 @@ test('readiness rejects formatting and an unregistered entry, then accepts repai
   assert.equal(initialized.status, 0, initialized.stderr)
   copyFileSync(join(root, 'mise.toml'), join(directory, 'mise.toml'))
   mkdirSync(join(directory, 'scripts'))
+  copyFileSync(join(root, 'scripts/agent-hooks.mjs'), join(directory, 'scripts/agent-hooks.mjs'))
   copyFileSync(
     join(root, 'scripts/test-git-environment.mjs'),
     join(directory, 'scripts/test-git-environment.mjs'),
@@ -75,6 +76,11 @@ test('readiness rejects formatting and an unregistered entry, then accepts repai
     [join(root, 'node_modules/prettier/bin/prettier.cjs'), '--write', 'knip.json'],
     { cwd: directory },
   )
+  result = run('run', 'agent:ready')
+  assert.notEqual(result.status, 0)
+  assert.match(result.stdout + result.stderr, /mise run hooks:install/)
+  result = run('run', 'hooks:install')
+  assert.equal(result.status, 0, result.stdout + result.stderr)
   result = run('run', 'agent:ready')
   assert.equal(result.status, 0, result.stdout + result.stderr)
   result = run('exec', '--', 'hk', 'run', 'pre-commit', '--step', 'prettier', 'entry.mjs')
