@@ -1,6 +1,217 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { publish } from './opencode-publish.mjs'
+import { diagnosticFor, failureNotice } from './opencode-diagnostic.mjs'
+import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createRequire } from 'node:module'
+
+test('publication diagnostic parsing rejects unknown data and bounds safe output', () => {
+  const diagnostic = {
+    version: 3,
+    code: 'publication',
+    stage: 'publish',
+    details: { reason: 'github_write', state: 'possible' },
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(diagnostic)) <= 1024)
+  for (const bad of [
+    { ...diagnostic, version: 1 },
+    { ...diagnostic, extra: 'fake-secret' },
+    { ...diagnostic, details: { ...diagnostic.details, status: 'fake-secret' } },
+    { ...diagnostic, details: { ...diagnostic.details, reason: 'fake-secret' } },
+    { ...diagnostic, details: { ...diagnostic.details, reason: ['github_write'] } },
+    { ...diagnostic, details: { ...diagnostic.details, state: 'fake-secret' } },
+  ]) {
+    assert.match(failureNotice(bad, 'run'), /При частичной публикации/)
+    assert.doesNotMatch(failureNotice(bad, 'run'), /fake-secret|Публикация не начиналась/)
+  }
+})
+
+test('remaining publication preflight failures expose fixed reasons without writes or leaks', async () => {
+  for (const reason of ['source_context', 'duplicate_markers', 'github_read', 'pagination']) {
+    const fixture = githubFixture()
+    if (reason === 'duplicate_markers') {
+      await publish(reply, context, fixture.api, 'run')
+      fixture.issues.push({ ...fixture.issues[0], number: 99 })
+    }
+    const writesBefore = fixture.calls.filter((call) => call.method === 'POST').length
+    const api = async (method, path, data) => {
+      if (path.startsWith('/issues?') && reason === 'github_read')
+        throw new Error('fake-secret GitHub response')
+      if (path.startsWith('/issues?') && reason === 'pagination')
+        return Array.from({ length: 100 }, () => ({ number: 1, body: 'fake-secret' }))
+      return fixture.api(method, path, data)
+    }
+    await assert.rejects(
+      publish(reply, reason === 'source_context' ? { ...context, number: 0 } : context, api, 'run'),
+      (error) => {
+        const diagnostic = diagnosticFor(error)
+        assert.deepEqual(diagnostic, {
+          version: 3,
+          code: 'publication',
+          stage: 'publish',
+          details: { reason, state: reason === 'duplicate_markers' ? 'possible' : 'unknown' },
+        })
+        assert.match(failureNotice(diagnostic, 'run'), /могла начаться/)
+        assert.doesNotMatch(JSON.stringify(error) + failureNotice(diagnostic, 'run'), /fake-secret/)
+        return true
+      },
+    )
+    assert.equal(fixture.calls.filter((call) => call.method === 'POST').length, writesBefore)
+  }
+})
+
+test('recovery preflight never hides previous publication when new writes are blocked', async () => {
+  const fixture = githubFixture()
+  await publish(reply, context, fixture.api, 'run')
+  const count = fixture.calls.filter((call) => call.method === 'POST').length
+  const changed = structuredClone(reply)
+  changed.publication.items[0].body = 'Changed'
+  for (const [input, source, api, reason, state] of [
+    [changed, context, fixture.api, 'changed_payload', 'possible'],
+    [
+      ticketReply(),
+      {
+        ...context,
+        related: [{ number: 8 }],
+        comments: [{ ...context.comments[0], user: { login: 'MeNn13', type: 'User' } }],
+      },
+      fixture.api,
+      'changed_payload',
+      'possible',
+    ],
+    [reply, { ...context, comments: [] }, fixture.api, 'trusted_request', 'unknown'],
+    [
+      reply,
+      context,
+      async () => {
+        throw new Error('fake-secret')
+      },
+      'configuration',
+      'unknown',
+    ],
+  ]) {
+    await assert.rejects(publish(input, source, api, 'run'), (error) => {
+      const diagnostic = diagnosticFor(error)
+      assert.deepEqual(diagnostic.details, { reason, state })
+      assert.match(failureNotice(diagnostic, 'run'), /могла начаться/)
+      assert.doesNotMatch(failureNotice(diagnostic, 'run'), /Публикация не начиналась|fake-secret/)
+      return true
+    })
+  }
+  assert.equal(fixture.calls.filter((call) => call.method === 'POST').length, count)
+})
+
+test('workflow reports publication failures safely and keeps the run failed', async () => {
+  const workflow = await readFile('.github/workflows/opencode.yml', 'utf8')
+  const source = workflow
+    .split('          script: |\n')[1]
+    .split('\n  publish-triage:')[0]
+    .split('\n')
+    .map((line) => line.slice(12))
+    .join('\n')
+  const directory = await mkdtemp(join(tmpdir(), 'opencode-publish-workflow-'))
+  const before = { temp: process.env.RUNNER_TEMP, result: process.env.ANSWER_RESULT }
+  try {
+    process.env.RUNNER_TEMP = directory
+    process.env.ANSWER_RESULT = 'success'
+    await mkdir(join(directory, 'opencode-context'))
+    await mkdir(join(directory, 'opencode-reply'))
+    for (const [prepared, answer, explanation, issueCount] of [
+      [JSON.stringify(context), JSON.stringify(reply), /GitHub не подтвердил операцию записи/, 1],
+      [
+        JSON.stringify({ ...context, requestId: 999 }),
+        JSON.stringify(reply),
+        /Контекст артефакта не соответствует текущему запуску/,
+        0,
+      ],
+      [
+        JSON.stringify(context),
+        'fake-secret invalid JSON',
+        /Не удалось прочитать артефакты публикации/,
+        0,
+      ],
+    ]) {
+      await writeFile(join(directory, 'opencode-context/context.json'), prepared)
+      await writeFile(join(directory, 'opencode-reply/reply.json'), answer)
+      const fixture = githubFixture()
+      const comments = [],
+        failures = []
+      const execute = new (Object.getPrototypeOf(async function () {}).constructor)(
+        'require',
+        'context',
+        'github',
+        'core',
+        source,
+      )
+      await execute(
+        createRequire(import.meta.url),
+        {
+          repo: { owner: 'MeNn13', repo: 'ai-for-developers-project-387' },
+          runId: 1,
+          eventName: 'issue_comment',
+          payload: { issue: { number: 9 }, comment: { id: 40 } },
+        },
+        {
+          request: async (route, data) => {
+            const [method, path] = route.split(' /repos/{owner}/{repo}')
+            const result = await fixture.api(method, path, data)
+            if (method === 'POST') throw new Error('fake-secret GitHub body')
+            return { data: result }
+          },
+          rest: { issues: { createComment: async (comment) => comments.push(comment) } },
+        },
+        { setFailed: (message) => failures.push(message) },
+      )
+      assert.equal(failures.length, 1)
+      assert.equal(comments.length, 1)
+      assert.match(comments[0].body, explanation)
+      assert.match(comments[0].body, /могла начаться/)
+      assert.doesNotMatch(JSON.stringify(comments) + JSON.stringify(failures), /fake-secret/)
+      assert.equal(fixture.issues.length, issueCount)
+    }
+  } finally {
+    if (before.temp === undefined) delete process.env.RUNNER_TEMP
+    else process.env.RUNNER_TEMP = before.temp
+    if (before.result === undefined) delete process.env.ANSWER_RESULT
+    else process.env.ANSWER_RESULT = before.result
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a lost first write result reports possible publication and resumes without duplication', async () => {
+  const fixture = githubFixture()
+  let fail = true
+  const uncertain = async (method, path, data) => {
+    const result = await fixture.api(method, path, data)
+    if (method === 'POST' && fail) {
+      fail = false
+      throw new Error('fake-secret response body')
+    }
+    return result
+  }
+  await assert.rejects(publish(reply, context, uncertain, 'run'), (error) => {
+    assert.deepEqual(diagnosticFor(error), {
+      version: 3,
+      code: 'publication',
+      stage: 'publish',
+      details: { reason: 'github_write', state: 'possible' },
+    })
+    assert.match(failureNotice(diagnosticFor(error), 'run'), /могла начаться/)
+    assert.doesNotMatch(JSON.stringify(error), /fake-secret/)
+    return true
+  })
+  await publish(reply, context, fixture.api, 'run')
+  assert.equal(fixture.issues.length, 1)
+  assert.equal(fixture.comments.length, 1)
+})
+
+const hasReason = (reason) => (error) => {
+  assert.equal(diagnosticFor(error).details.reason, reason)
+  assert.doesNotMatch(JSON.stringify(error), /fake-secret|GitHub unavailable|Label missing/)
+  return true
+}
 
 const context = {
   number: 9,
@@ -143,7 +354,7 @@ test('resumes after a dependency failure without duplicating issues, children or
       throw new Error('GitHub unavailable')
     return fixture.api(...args)
   }
-  await assert.rejects(publish(ticketReply(), source, flaky, 'run'), /unavailable/)
+  await assert.rejects(publish(ticketReply(), source, flaky, 'run'), hasReason('github_write'))
   assert.equal(fixture.issues.length, 2)
   assert.equal(fixture.comments.length, 0)
   await publish(ticketReply(), source, fixture.api, 'run')
@@ -166,17 +377,17 @@ test('rejects malformed publications, cycles, unknown specifications and absent 
   ]
   for (const result of badReplies) {
     const fixture = githubFixture()
-    await assert.rejects(publish(result, context, fixture.api, 'run'), /Invalid/)
+    await assert.rejects(publish(result, context, fixture.api, 'run'), /publication/)
     assert.equal(fixture.calls.filter((call) => call.method !== 'GET').length, 0)
   }
   const fixture = githubFixture()
   await assert.rejects(
     publish(reply, { ...context, pr: {} }, fixture.api, 'run'),
-    /only available in issues/,
+    hasReason('issue_only'),
   )
   await assert.rejects(
     publish(reply, { ...context, comments: [] }, fixture.api, 'run'),
-    /trusted request/,
+    hasReason('trusted_request'),
   )
 })
 
@@ -185,9 +396,9 @@ test('changed payload on retry fails without creating more issues', async () => 
   await publish(reply, context, fixture.api, 'run')
   const changed = structuredClone(reply)
   changed.publication.items[0].title = 'Changed'
-  await assert.rejects(publish(changed, context, fixture.api, 'run'), /rerun changed/)
+  await assert.rejects(publish(changed, context, fixture.api, 'run'), hasReason('changed_payload'))
   changed.publication.items[0].key = 'replacement'
-  await assert.rejects(publish(changed, context, fixture.api, 'run'), /rerun changed/)
+  await assert.rejects(publish(changed, context, fixture.api, 'run'), hasReason('changed_payload'))
   assert.equal(fixture.issues.length, 1)
 })
 
@@ -207,7 +418,7 @@ test('approval must exist and belong to a trusted human even when the specificat
         fixture.api,
         'run',
       ),
-      /trusted approval/,
+      hasReason('approval'),
     )
     assert.equal(fixture.calls.length, 0)
   }
@@ -236,7 +447,7 @@ test('missing label fails before creation; ordinary discussion preserves leading
       },
       'run',
     ),
-    /Label missing/,
+    hasReason('configuration'),
   )
   const comment = '> *This was generated by AI during triage.*\n\nУточните ширину экрана.'
   await publish({ version: 1, comment }, context, fixture.api, 'run')

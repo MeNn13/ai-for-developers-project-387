@@ -84,8 +84,8 @@ run = "npm run syncpack"
 run = "npm run agent:lint"
 
 [tasks."agent:ready"]
-description = "Check formatting and Knip before agent handoff"
-run = [{ task = "lint:format" }, { task = "knip" }]
+description = "Check formatting, Knip and installed Git hooks before agent handoff"
+run = [{ task = "lint:format" }, { task = "knip" }, "node scripts/agent-hooks.mjs", "hk --version"]
 
 [tasks."agent:rules"]
 run = "node scripts/agent-rules.mjs --output artifacts/agent-workflow.rules"
