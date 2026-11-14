@@ -21,7 +21,14 @@ export async function pages(api, path) {
   throw new WorkflowError('Discussion is too large to read completely.')
 }
 
-export async function prepare(eventName, event, api) {
+export async function prepare(eventName, event, api, options = {}) {
+  if (
+    !options.repair &&
+    event.action === 'created' &&
+    (event.issue?.pull_request || event.pull_request) &&
+    /^\s*\/(?:oc|opencode)\s+fix(?:\s|$)/i.test(event.comment?.body ?? '')
+  )
+    return null
   if (eventName === 'issues') {
     if (event.action !== 'opened' || !triageEligible(event.issue)) return null
     const issue = await api(`/issues/${event.issue.number}`)
@@ -341,6 +348,12 @@ async function main() {
   if (!directory) throw new WorkflowError('OPENCODE_IO is required.')
   if (process.argv[2] === 'prepare') {
     const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'))
+    const repair =
+      event.action === 'created' &&
+      Boolean(event.issue?.pull_request || event.pull_request) &&
+      trustedHuman(event.comment ?? {}) &&
+      /^\s*\/(?:oc|opencode)\s+fix(?:\s|$)/i.test(event.comment?.body ?? '')
+    await appendFile(process.env.GITHUB_OUTPUT, `repair=${repair}\n`)
     const prepared = await prepare(process.env.GITHUB_EVENT_NAME, event, github)
     await appendFile(process.env.GITHUB_OUTPUT, `allowed=${Boolean(prepared)}\n`)
     if (!prepared) return

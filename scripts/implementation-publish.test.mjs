@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict'
+﻿import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
 import { publishImplementation } from './implementation-publish.mjs'
@@ -420,4 +420,38 @@ test('App authentication requests only the fixed repository and permissions; rev
   execFileSync(process.execPath, ['--import', preload, script, 'revoke'], {
     env: { ...process.env, GH_TOKEN: 'fixture-token' },
   })
+})
+
+test('verified ready false converts an existing ready PR back to draft', async () => {
+  const f = fixture()
+  let receipt
+  const trusted = { ...trust(), publisherRunId: 8 }
+  await publishImplementation(result, context, f.api, trusted, (r) => {
+    receipt = r
+  })
+  const mutations = []
+  const api = async (method, path, data) => {
+    if (path === '/actions/runs/8')
+      return {
+        path: '.github/workflows/implementation-publish.yml',
+        head_branch: 'main',
+        head_sha: sha,
+        repository: { full_name: 'MeNn13/ai-for-developers-project-387' },
+      }
+    if (path === '/graphql') {
+      mutations.push(data)
+      return {}
+    }
+    const value = await f.api(method, path, data)
+    if (path.startsWith('/pulls?')) value[0].draft = false
+    return value
+  }
+  await publishImplementation(result, context, api, {
+    ...trusted,
+    previous: receipt,
+    previousRunId: 8,
+  })
+  assert.equal(mutations.length, 1)
+  assert.match(mutations[0].query, /convertPullRequestToDraft/)
+  assert.deepEqual(mutations[0].variables, { id: 'PR_50' })
 })

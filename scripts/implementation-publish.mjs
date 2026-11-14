@@ -11,7 +11,7 @@ function requireValue(condition, reason) {
 }
 
 // Deliberately narrow: new infrastructure and instructions require a human PR.
-function allowedFile(file) {
+export function allowedFile(file) {
   const path = file.path
   return (
     typeof path === 'string' &&
@@ -44,19 +44,43 @@ export async function publishImplementation(
     const run = await api('GET', `/actions/runs/${trust.runId}`)
     requireValue(
       run.id === trust.runId &&
-        run.path === '.github/workflows/opencode-implement.yml' &&
+        ['.github/workflows/opencode-implement.yml', '.github/workflows/opencode.yml'].includes(
+          run.path,
+        ) &&
         run.head_sha === trust.trustedSha &&
         run.head_branch === 'main' &&
         run.repository?.full_name === repository &&
-        run.conclusion === 'success',
+        (run.conclusion === 'success' ||
+          (run.path === '.github/workflows/opencode.yml' && run.status === 'in_progress')),
       'origin',
     )
     const jobs = await api('GET', `/actions/runs/${trust.runId}/jobs?per_page=100`)
+    if (context.repair) {
+      requireValue(trust.publisherRunId === trust.runId && positive(trust.runAttempt), 'trust')
+      const admission = await api(
+        'GET',
+        `/actions/runs/${trust.runId}/attempts/${trust.runAttempt}/jobs?per_page=100`,
+      )
+      requireValue(
+        admission.total_count === admission.jobs.length &&
+          admission.jobs.some(
+            (j) =>
+              j.name === `implementation-publish-pr-${context.repair.number}` &&
+              j.steps?.some(
+                (s) => s.name === 'implementation-admitted' && s.conclusion === 'success',
+              ),
+          ),
+        'trust',
+      )
+    }
     requireValue(
       jobs.total_count === jobs.jobs.length &&
         ['implementation-context', 'implementation-check'].every(
           (name) =>
-            jobs.jobs.filter((j) => j.name === name && j.conclusion === 'success').length === 1,
+            jobs.jobs.filter(
+              (j) =>
+                (j.name === name || j.name.startsWith(`${name}-pr-`)) && j.conclusion === 'success',
+            ).length === 1,
         ),
       'checks',
     )
@@ -167,7 +191,9 @@ export async function publishImplementation(
       )
       const priorRun = await api('GET', `/actions/runs/${previous.publisherRunId}`)
       requireValue(
-        priorRun.path === '.github/workflows/implementation-publish.yml' &&
+        ['.github/workflows/implementation-publish.yml', '.github/workflows/opencode.yml'].includes(
+          priorRun.path,
+        ) &&
           priorRun.head_branch === 'main' &&
           priorRun.repository?.full_name === repository &&
           shaPattern.test(priorRun.head_sha),
@@ -219,6 +245,7 @@ export async function publishImplementation(
       const receipt = {
         version: 1,
         publisherRunId: trust.publisherRunId,
+        sourceRunId: trust.runId,
         appId: trust.appId,
         branch,
         head: commitSha,
@@ -253,6 +280,12 @@ export async function publishImplementation(
         await api('POST', '/graphql', {
           query:
             'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}',
+          variables: { id: published.node_id },
+        })
+      if (!result.ready && !published.draft)
+        await api('POST', '/graphql', {
+          query:
+            'mutation($id:ID!){convertPullRequestToDraft(input:{pullRequestId:$id}){pullRequest{id}}}',
           variables: { id: published.node_id },
         })
       return receipt
@@ -314,6 +347,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       trustedSha: process.env.TRUSTED_SHA,
       runId: Number(process.env.SOURCE_RUN_ID),
       publisherRunId: Number(process.env.GITHUB_RUN_ID),
+      runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
       appId: Number(process.env.PUBLISH_APP_BOT_ID),
       verification: await read('verification'),
     }
