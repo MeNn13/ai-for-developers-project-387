@@ -11,7 +11,7 @@ const model = 'opencode/glm-5.3-flash-free'
 // Only deliberate internal diagnostics may be printed in public logs.
 class WorkflowError extends Error {}
 
-async function pages(api, path) {
+export async function pages(api, path) {
   const items = []
   for (let page = 1; page <= 100; page++) {
     const batch = await api(`${path}?per_page=100&page=${page}`)
@@ -21,7 +21,21 @@ async function pages(api, path) {
   throw new WorkflowError('Discussion is too large to read completely.')
 }
 
-export async function prepare(eventName, event, api) {
+export async function prepare(eventName, event, api, options = {}) {
+  if (
+    !options.initial &&
+    eventName === 'issue_comment' &&
+    !event.issue?.pull_request &&
+    /^\s*\/(?:oc|opencode)\s+implement-spec(?:\s|$)/i.test(event.comment?.body ?? '')
+  )
+    return null
+  if (
+    !options.repair &&
+    event.action === 'created' &&
+    (event.issue?.pull_request || event.pull_request) &&
+    /^\s*\/(?:oc|opencode)\s+fix(?:\s|$)/i.test(event.comment?.body ?? '')
+  )
+    return null
   if (eventName === 'issues') {
     if (event.action !== 'opened' || !triageEligible(event.issue)) return null
     const issue = await api(`/issues/${event.issue.number}`)
@@ -98,7 +112,7 @@ export async function prepare(eventName, event, api) {
   return { number, context: serialized }
 }
 
-async function relatedIssues(source, repository, api) {
+export async function relatedIssues(source, repository, api) {
   const seen = new Set([source.number])
   const related = []
   let frontier = [source]
@@ -144,7 +158,7 @@ async function relatedIssues(source, repository, api) {
   return related
 }
 
-async function github(path, accept = 'application/vnd.github+json') {
+export async function github(path, accept = 'application/vnd.github+json') {
   const response = await fetch(
     `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}${path}`,
     {
@@ -272,14 +286,15 @@ export function resultReply(stream) {
   return reply
 }
 
-async function run(directory) {
+export async function run(directory, options = {}) {
   if (!process.env.OPENCODE_API_KEY) throw new DiagnosticError('configuration')
   let context, prompt, automatic
   try {
     context = await readFile(join(directory, 'context.json'), 'utf8')
     automatic = JSON.parse(context).mode === 'triage'
     prompt = await readFile(
-      automatic ? '.github/opencode/triage-prompt.txt' : '.github/opencode/prompt.txt',
+      options.prompt ??
+        (automatic ? '.github/opencode/triage-prompt.txt' : '.github/opencode/prompt.txt'),
       'utf8',
     )
   } catch {
@@ -298,7 +313,7 @@ async function run(directory) {
       '--model',
       model,
       '--title',
-      'GitHub discussion',
+      options.title ?? 'GitHub discussion',
     ],
     { stdio: ['pipe', 'pipe', 'pipe'] },
   )
@@ -340,6 +355,19 @@ async function main() {
   if (!directory) throw new WorkflowError('OPENCODE_IO is required.')
   if (process.argv[2] === 'prepare') {
     const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'))
+    const repair =
+      event.action === 'created' &&
+      Boolean(event.issue?.pull_request || event.pull_request) &&
+      trustedHuman(event.comment ?? {}) &&
+      /^\s*\/(?:oc|opencode)\s+fix(?:\s|$)/i.test(event.comment?.body ?? '')
+    await appendFile(process.env.GITHUB_OUTPUT, `repair=${repair}\n`)
+    const initial =
+      process.env.GITHUB_EVENT_NAME === 'issue_comment' &&
+      event.action === 'created' &&
+      !event.issue?.pull_request &&
+      trustedHuman(event.comment ?? {}) &&
+      /^\s*\/(?:oc|opencode)\s+implement-spec(?:\s|$)/i.test(event.comment?.body ?? '')
+    await appendFile(process.env.GITHUB_OUTPUT, `initial=${initial}\n`)
     const prepared = await prepare(process.env.GITHUB_EVENT_NAME, event, github)
     await appendFile(process.env.GITHUB_OUTPUT, `allowed=${Boolean(prepared)}\n`)
     if (!prepared) return

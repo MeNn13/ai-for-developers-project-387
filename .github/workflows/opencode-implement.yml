@@ -1,0 +1,369 @@
+﻿name: opencode-implement
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Source issue number
+        required: true
+        type: string
+      comment:
+        description: Explicit approving human comment ID
+        required: true
+        type: string
+      approval_digest:
+        description: SHA-256 of the JSON encoded original human comment body
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: initial-source-${{ inputs.source }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  source:
+    name: initial-source-${{ inputs.source }}
+    if: >-
+      vars.IMPLEMENTATION_INITIAL_ENABLED == 'true' && github.ref == 'refs/heads/main' &&
+      (github.actor == 'MeNn13' || github.actor == 'github-actions[bot]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - run: echo 'Initial implementation request'
+
+  context:
+    name: implementation-context
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+    outputs:
+      sha: ${{ steps.base.outputs.sha }}
+      spec: ${{ steps.context.outputs.spec }}
+    steps:
+      - name: Configure runtime paths
+        run: |
+          printf '%s\n' "INITIAL_IO=$RUNNER_TEMP/initial" "INITIAL_CANDIDATE_ROOT=$RUNNER_TEMP/candidate" "PUBLISH_IO=$RUNNER_TEMP/initial" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Bind explicit human approval and native graph
+        id: context
+        run: node scripts/implementation-initial.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_SHA: ${{ steps.base.outputs.sha }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          overwrite: true
+          name: implementation-context
+          path: ${{ runner.temp }}/initial/context.json
+          retention-days: 7
+
+  first:
+    name: implementation-check
+    needs: [context]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+    steps:
+      - name: Configure runtime paths
+        run: |
+          printf '%s\n' "INITIAL_IO=$RUNNER_TEMP/initial" "INITIAL_CANDIDATE_ROOT=$RUNNER_TEMP/candidate" "PUBLISH_IO=$RUNNER_TEMP/initial" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-context
+          path: ${{ runner.temp }}/initial
+      - name: Install pinned toolchain
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d
+      - name: Prepare isolated candidate worktree
+        shell: bash
+        run: |
+          head=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.INITIAL_IO+"/context.json")).expectedHead')
+          git fetch origin "$head"
+          git worktree add --detach "$INITIAL_CANDIDATE_ROOT" "$head"
+          mise trust "$INITIAL_CANDIDATE_ROOT/mise.toml"
+          cd "$INITIAL_CANDIDATE_ROOT"
+          mise run install
+      - name: Install pinned read-only model and isolation
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          curl --fail --silent --show-error --location https://github.com/anomalyco/opencode/releases/download/v2.2.3/opencode-linux-x64.tar.gz --output "$RUNNER_TEMP/opencode.tar.gz"
+          echo "ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35  $RUNNER_TEMP/opencode.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/opencode-bin"
+          tar -xzf "$RUNNER_TEMP/opencode.tar.gz" -C "$RUNNER_TEMP/opencode-bin"
+          echo "$RUNNER_TEMP/opencode-bin" >> "$GITHUB_PATH"
+          sudo mkdir -p /etc/opencode
+          jq '.update = "disable"' .github/opencode/opencode.json | sudo tee /etc/opencode/opencode.json > /dev/null
+      - name: Execute dependency graph and verify exact integration commits
+        id: graph
+        continue-on-error: true
+        run: node scripts/implementation-graph.mjs first
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      - name: initial-timeout
+        if: steps.graph.outputs.reason == 'timeout'
+        run: echo 'Initial deadline reached'
+      - name: Reject unsuccessful graph
+        if: steps.graph.outcome != 'success'
+        run: exit 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          overwrite: true
+          name: implementation-context
+          path: ${{ runner.temp }}/initial/context.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          overwrite: true
+          name: implementation-result
+          path: ${{ runner.temp }}/initial/result.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          overwrite: true
+          name: implementation-verification
+          path: ${{ runner.temp }}/initial/verification.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          overwrite: true
+          name: initial-first-evidence
+          path: |
+            ${{ runner.temp }}/initial/integrations.json
+            ${{ runner.temp }}/initial/result.json
+          retention-days: 7
+
+  publish-first:
+    name: initial-publish-spec-${{ needs.context.outputs.spec }}
+    needs: [context, first]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: implementation-publisher
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Configure runtime paths
+        run: |
+          printf '%s\n' "INITIAL_IO=$RUNNER_TEMP/initial" "INITIAL_CANDIDATE_ROOT=$RUNNER_TEMP/candidate" "PUBLISH_IO=$RUNNER_TEMP/initial" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-context
+          path: ${{ runner.temp }}/initial/context
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-result
+          path: ${{ runner.temp }}/initial/result
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-verification
+          path: ${{ runner.temp }}/initial/verification
+      - name: Mint repository-scoped installation token
+        id: installation
+        run: node scripts/implementation-app.mjs
+        env:
+          PUBLISH_APP_ID: ${{ vars.PUBLISH_APP_ID }}
+          PUBLISH_INSTALLATION_ID: ${{ vars.PUBLISH_INSTALLATION_ID }}
+          PUBLISH_APP_PRIVATE_KEY: ${{ secrets.PUBLISH_APP_PRIVATE_KEY }}
+      - name: Publish first draft with trusted App operations
+        run: node scripts/implementation-publish.mjs
+        env:
+          TRUSTED_SHA: ${{ needs.context.outputs.sha }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          PUBLISH_APP_BOT_ID: ${{ vars.PUBLISH_APP_BOT_ID }}
+      - name: Revoke installation token
+        if: always() && steps.installation.outcome == 'success'
+        run: node scripts/implementation-app.mjs revoke
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          overwrite: true
+          name: implementation-publication
+          path: ${{ runner.temp }}/initial/publication.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  final:
+    name: implementation-final-check
+    needs: [context, publish-first]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+    steps:
+      - name: Configure runtime paths
+        run: |
+          printf '%s\n' "INITIAL_IO=$RUNNER_TEMP/initial" "INITIAL_CANDIDATE_ROOT=$RUNNER_TEMP/candidate" "PUBLISH_IO=$RUNNER_TEMP/initial" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-context
+          path: ${{ runner.temp }}/initial
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: initial-first-evidence
+          path: ${{ runner.temp }}/initial
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-publication
+          path: ${{ runner.temp }}/initial
+      - name: Revalidate consent and rebind published parent
+        run: node scripts/implementation-initial.mjs rebind
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_SHA: ${{ needs.context.outputs.sha }}
+      - name: Install pinned toolchain
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d
+      - name: Prepare isolated candidate worktree
+        shell: bash
+        run: |
+          head=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.INITIAL_IO+"/context.json")).expectedHead')
+          git fetch origin "$head"
+          git worktree add --detach "$INITIAL_CANDIDATE_ROOT" "$head"
+          mise trust "$INITIAL_CANDIDATE_ROOT/mise.toml"
+          cd "$INITIAL_CANDIDATE_ROOT"
+          mise run install
+      - name: Install pinned read-only model and isolation
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          curl --fail --silent --show-error --location https://github.com/anomalyco/opencode/releases/download/v2.2.3/opencode-linux-x64.tar.gz --output "$RUNNER_TEMP/opencode.tar.gz"
+          echo "ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35  $RUNNER_TEMP/opencode.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/opencode-bin"
+          tar -xzf "$RUNNER_TEMP/opencode.tar.gz" -C "$RUNNER_TEMP/opencode-bin"
+          echo "$RUNNER_TEMP/opencode-bin" >> "$GITHUB_PATH"
+          sudo mkdir -p /etc/opencode
+          jq '.update = "disable"' .github/opencode/opencode.json | sudo tee /etc/opencode/opencode.json > /dev/null
+      - name: Execute dependency graph and verify exact integration commits
+        id: graph
+        continue-on-error: true
+        run: node scripts/implementation-graph.mjs final
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      - name: initial-timeout
+        if: steps.graph.outputs.reason == 'timeout'
+        run: echo 'Initial deadline reached'
+      - name: Reject unsuccessful graph
+        if: steps.graph.outcome != 'success'
+        run: exit 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          overwrite: true
+          name: implementation-context
+          path: ${{ runner.temp }}/initial/context.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          overwrite: true
+          name: implementation-result
+          path: ${{ runner.temp }}/initial/result.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          overwrite: true
+          name: implementation-verification
+          path: ${{ runner.temp }}/initial/verification.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          overwrite: true
+          name: initial-final-evidence
+          path: |
+            ${{ runner.temp }}/initial/integrations.json
+            ${{ runner.temp }}/initial/result.json
+            ${{ runner.temp }}/initial/review-*.json
+          retention-days: 7
+
+  publish-final:
+    name: initial-publish-spec-${{ needs.context.outputs.spec }}
+    needs: [context, final]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: implementation-publisher
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Configure runtime paths
+        run: |
+          printf '%s\n' "INITIAL_IO=$RUNNER_TEMP/initial" "INITIAL_CANDIDATE_ROOT=$RUNNER_TEMP/candidate" "PUBLISH_IO=$RUNNER_TEMP/initial" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-context
+          path: ${{ runner.temp }}/initial/context
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-result
+          path: ${{ runner.temp }}/initial/result
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-verification
+          path: ${{ runner.temp }}/initial/verification
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: implementation-publication
+          path: ${{ runner.temp }}/initial/previous
+      - name: Mint repository-scoped installation token
+        id: installation
+        run: node scripts/implementation-app.mjs
+        env:
+          PUBLISH_APP_ID: ${{ vars.PUBLISH_APP_ID }}
+          PUBLISH_INSTALLATION_ID: ${{ vars.PUBLISH_INSTALLATION_ID }}
+          PUBLISH_APP_PRIVATE_KEY: ${{ secrets.PUBLISH_APP_PRIVATE_KEY }}
+      - name: Publish ready graph with trusted App operations
+        run: node scripts/implementation-publish.mjs
+        env:
+          TRUSTED_SHA: ${{ needs.context.outputs.sha }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          PUBLISH_APP_BOT_ID: ${{ vars.PUBLISH_APP_BOT_ID }}
+          PREVIOUS_RUN_ID: ${{ github.run_id }}
+      - name: Revoke installation token
+        if: always() && steps.installation.outcome == 'success'
+        run: node scripts/implementation-app.mjs revoke
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          overwrite: true
+          name: implementation-publication
+          path: ${{ runner.temp }}/initial/publication.json
+          if-no-files-found: ignore
+          retention-days: 7

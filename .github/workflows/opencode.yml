@@ -13,7 +13,7 @@ permissions: {}
 concurrency:
   # Only reruns of this comment compete here. Admitted requests compete below.
   group: opencode-${{ github.event_name }}-${{ github.event.comment.id || github.event.issue.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   context:
@@ -32,6 +32,8 @@ jobs:
     outputs:
       allowed: ${{ steps.context.outputs.allowed }}
       commit: ${{ steps.commit.outputs.sha }}
+      repair: ${{ steps.context.outputs.repair }}
+      initial: ${{ steps.context.outputs.initial }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -50,9 +52,28 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: steps.context.outputs.allowed == 'true'
         with:
+          overwrite: true
           name: opencode-context
           path: ${{ runner.temp }}/opencode-context/context.json
           retention-days: 1
+
+  dispatch-initial:
+    needs: context
+    if: needs.context.outputs.initial == 'true' && vars.IMPLEMENTATION_INITIAL_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.commit }}
+          persist-credentials: false
+      - name: Dispatch explicit initial implementation
+        run: node scripts/implementation-initial.mjs dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   answer:
     needs: context
@@ -61,7 +82,7 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: opencode-answer-${{ github.event_name == 'issues' && 'triage' || 'manual' }}-${{ github.event.issue.number || github.event.pull_request.number }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     permissions:
       contents: read
     steps:
@@ -92,12 +113,14 @@ jobs:
           OPENCODE_IO: ${{ runner.temp }}/opencode-io
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
+          overwrite: true
           name: opencode-reply
           path: ${{ runner.temp }}/opencode-io/reply.json
           retention-days: 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure() && !cancelled()
         with:
+          overwrite: true
           name: opencode-diagnostic
           path: ${{ runner.temp }}/opencode-io/diagnostic.json
           if-no-files-found: ignore
@@ -227,3 +250,359 @@ jobs:
               const response = await github.request(`${method} /repos/{owner}/{repo}${route}`, { ...context.repo, ...data });
               return response.data;
             }, `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`);
+
+  implementation-context:
+    name: implementation-context-pr-${{ github.event.issue.number || github.event.pull_request.number }}
+    needs: context
+    if: needs.context.outputs.repair == 'true' && vars.IMPLEMENTATION_REPAIR_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: implementation-admission-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+    outputs:
+      previous: ${{ steps.gate.outputs.previous }}
+      head: ${{ steps.gate.outputs.head }}
+    env:
+      TRUSTED_SHA: ${{ needs.context.outputs.commit }}
+      PUBLISH_APP_BOT_ID: ${{ vars.PUBLISH_APP_BOT_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fresh admission for this job and run attempt
+        id: gate
+        run: node scripts/implementation-repair.mjs gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: implementation-limit_exhausted
+        if: steps.gate.outputs.reason == 'limit_exhausted'
+        run: echo 'Нужен человек'
+      - name: implementation-busy
+        if: steps.gate.outputs.reason == 'busy'
+        run: echo 'Дождитесь завершения'
+      - name: implementation-admitted
+        if: steps.gate.outputs.allowed == 'true'
+        run: echo 'Trusted Actions admission'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-publication
+          path: ${{ runner.temp }}/repair/previous
+          run-id: ${{ steps.gate.outputs.previous }}
+          github-token: ${{ github.token }}
+      - name: Validate previous publication origin
+        if: steps.gate.outputs.allowed == 'true'
+        id: receipt
+        run: node scripts/implementation-repair.mjs receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_RUN_ID: ${{ steps.gate.outputs.previous }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-context
+          path: ${{ runner.temp }}/repair/original
+          run-id: ${{ steps.receipt.outputs.source }}
+          github-token: ${{ github.token }}
+      - name: Bind approved requirements and PR discussion
+        if: steps.gate.outputs.allowed == 'true'
+        run: node scripts/implementation-repair.mjs context
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          overwrite: true
+          name: implementation-context
+          path: ${{ runner.temp }}/repair/context.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          overwrite: true
+          name: implementation-prompt
+          path: ${{ runner.temp }}/repair/prompt.json
+          retention-days: 7
+
+  implementation-model:
+    name: implementation-model-pr-${{ github.event.issue.number || github.event.pull_request.number }}
+    needs: [context, implementation-context]
+    if: needs.implementation-context.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    concurrency:
+      group: implementation-admission-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+    env:
+      TRUSTED_SHA: ${{ needs.context.outputs.commit }}
+      PUBLISH_APP_BOT_ID: ${{ vars.PUBLISH_APP_BOT_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fresh admission for this job and run attempt
+        id: gate
+        run: node scripts/implementation-repair.mjs gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: implementation-limit_exhausted
+        if: steps.gate.outputs.reason == 'limit_exhausted'
+        run: echo 'Нужен человек'
+      - name: implementation-busy
+        if: steps.gate.outputs.reason == 'busy'
+        run: echo 'Дождитесь завершения'
+      - name: implementation-admitted
+        if: steps.gate.outputs.allowed == 'true'
+        run: echo 'Trusted Actions admission'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-context
+          path: ${{ runner.temp }}/repair/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-prompt
+          path: ${{ runner.temp }}/repair/
+      - name: Install pinned read-only OpenCode CLI
+        if: steps.gate.outputs.allowed == 'true'
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location             https://github.com/anomalyco/opencode/releases/download/v2.2.3/opencode-linux-x64.tar.gz             --output "$RUNNER_TEMP/opencode.tar.gz"
+          echo "ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35  $RUNNER_TEMP/opencode.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/opencode-bin"
+          tar -xzf "$RUNNER_TEMP/opencode.tar.gz" -C "$RUNNER_TEMP/opencode-bin"
+          echo "$RUNNER_TEMP/opencode-bin" >> "$GITHUB_PATH"
+          sudo mkdir -p /etc/opencode
+          jq '.update = "disable"' .github/opencode/opencode.json | sudo tee /etc/opencode/opencode.json > /dev/null
+      - name: Validate configured model key
+        if: steps.gate.outputs.allowed == 'true'
+        run: node -e "if (!process.env.OPENCODE_API_KEY) process.exit(1)"
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      - name: Prepare file data without GitHub token or App key
+        if: steps.gate.outputs.allowed == 'true'
+        run: node scripts/implementation-repair.mjs model
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          overwrite: true
+          name: implementation-reply
+          path: ${{ runner.temp }}/repair/reply.json
+          retention-days: 7
+
+  implementation-check:
+    name: implementation-check-pr-${{ github.event.issue.number || github.event.pull_request.number }}
+    needs: [context, implementation-context, implementation-model]
+    if: needs.implementation-model.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: implementation-admission-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+    env:
+      TRUSTED_SHA: ${{ needs.context.outputs.commit }}
+      PUBLISH_APP_BOT_ID: ${{ vars.PUBLISH_APP_BOT_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fresh admission for this job and run attempt
+        id: gate
+        run: node scripts/implementation-repair.mjs gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: implementation-limit_exhausted
+        if: steps.gate.outputs.reason == 'limit_exhausted'
+        run: echo 'Нужен человек'
+      - name: implementation-busy
+        if: steps.gate.outputs.reason == 'busy'
+        run: echo 'Дождитесь завершения'
+      - name: implementation-admitted
+        if: steps.gate.outputs.allowed == 'true'
+        run: echo 'Trusted Actions admission'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-context
+          path: ${{ runner.temp }}/repair/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-reply
+          path: ${{ runner.temp }}/repair/
+      - name: Fetch exact App branch head without credentials
+        if: steps.gate.outputs.allowed == 'true'
+        env:
+          EXPECTED_HEAD: ${{ needs.implementation-context.outputs.head }}
+        run: |
+          git fetch origin "$EXPECTED_HEAD"
+          echo "REPAIR_CANDIDATE_ROOT=$RUNNER_TEMP/repair-candidate" >> "$GITHUB_ENV"
+          git worktree add --detach "$RUNNER_TEMP/repair-candidate" "$EXPECTED_HEAD"
+      - name: Validate protected baseline before candidate execution
+        if: steps.gate.outputs.allowed == 'true'
+        run: node scripts/implementation-repair.mjs baseline
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          version: '2026.10.12'
+      - name: Install trusted dependencies and browser
+        if: steps.gate.outputs.allowed == 'true'
+        working-directory: ${{ runner.temp }}/repair-candidate
+        run: |
+          mise trust
+          mise run install
+          mise exec -- npx playwright install --with-deps --only-shell chromium
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Construct filtered candidate commit
+        if: steps.gate.outputs.allowed == 'true'
+        run: node scripts/implementation-repair.mjs candidate
+      - name: Check candidate in restricted filesystem
+        if: steps.gate.outputs.allowed == 'true'
+        run: node scripts/implementation-sandbox.mjs
+      - name: Record successful exact SHA verification
+        if: steps.gate.outputs.allowed == 'true'
+        run: node scripts/implementation-repair.mjs verify
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          overwrite: true
+          name: implementation-result
+          path: ${{ runner.temp }}/repair/result.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          overwrite: true
+          name: implementation-verification
+          path: ${{ runner.temp }}/repair/verification.json
+          retention-days: 7
+
+  implementation-publish:
+    name: implementation-publish-pr-${{ github.event.issue.number || github.event.pull_request.number }}
+    needs: [context, implementation-context, implementation-check]
+    if: needs.implementation-check.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: implementation-admission-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+    environment: implementation-publisher
+    env:
+      TRUSTED_SHA: ${{ needs.context.outputs.commit }}
+      PUBLISH_APP_BOT_ID: ${{ vars.PUBLISH_APP_BOT_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fresh admission for this job and run attempt
+        id: gate
+        run: node scripts/implementation-repair.mjs gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: implementation-limit_exhausted
+        if: steps.gate.outputs.reason == 'limit_exhausted'
+        run: echo 'Нужен человек'
+      - name: implementation-busy
+        if: steps.gate.outputs.reason == 'busy'
+        run: echo 'Дождитесь завершения'
+      - name: implementation-admitted
+        if: steps.gate.outputs.allowed == 'true'
+        run: echo 'Trusted Actions admission'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-context
+          path: ${{ runner.temp }}/repair/context
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-result
+          path: ${{ runner.temp }}/repair/result
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-verification
+          path: ${{ runner.temp }}/repair/verification
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          name: implementation-publication
+          path: ${{ runner.temp }}/repair/previous
+          run-id: ${{ needs.implementation-context.outputs.previous }}
+          github-token: ${{ github.token }}
+      - name: Locate current run publication checkpoint
+        id: recovery
+        if: steps.gate.outputs.allowed == 'true' && github.run_attempt > 1
+        run: node scripts/implementation-repair.mjs recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true' && steps.recovery.outputs.artifact != ''
+        with:
+          artifact-ids: ${{ steps.recovery.outputs.artifact }}
+          merge-multiple: true # Exactly one validated artifact ID from this run.
+          path: ${{ runner.temp }}/repair/recovery
+      - name: Mint repository-scoped installation token
+        id: installation
+        if: steps.gate.outputs.allowed == 'true'
+        run: node scripts/implementation-app.mjs
+        env:
+          PUBLISH_APP_ID: ${{ vars.PUBLISH_APP_ID }}
+          PUBLISH_INSTALLATION_ID: ${{ vars.PUBLISH_INSTALLATION_ID }}
+          PUBLISH_APP_PRIVATE_KEY: ${{ secrets.PUBLISH_APP_PRIVATE_KEY }}
+      - name: Publish checked repair with fixed App operations
+        if: steps.gate.outputs.allowed == 'true'
+        run: node scripts/implementation-publish.mjs
+        env:
+          PUBLISH_IO: ${{ runner.temp }}/repair
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          PREVIOUS_RUN_ID: ${{ needs.implementation-context.outputs.previous }}
+          RECOVERY_ARTIFACT_ID: ${{ steps.recovery.outputs.artifact }}
+      - name: Revoke installation token
+        if: always() && steps.installation.outcome == 'success'
+        run: node scripts/implementation-app.mjs revoke
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          overwrite: true
+          name: implementation-publication
+          path: ${{ runner.temp }}/repair/publication.json
+          if-no-files-found: ignore
+          retention-days: 7

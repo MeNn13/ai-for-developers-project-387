@@ -1,0 +1,54 @@
+name: browser-acceptance
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-acceptance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PLAYWRIGHT_TRACE: 'on'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify checked out head
+        run: |
+          mkdir -p artifacts/e2e
+          git rev-parse HEAD > artifacts/e2e/actual-sha.txt
+          test "$(cat artifacts/e2e/actual-sha.txt)" = "$EXPECTED_SHA"
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          version: '2026.10.12'
+      - run: mise trust
+      - run: mise run install
+      - name: Install Chromium
+        run: mise exec -- npx playwright install --with-deps --only-shell chromium
+      - name: Run existing browser scenarios
+        id: scenarios
+        run: mise run test:e2e
+      - name: Record browser evidence
+        if: always()
+        env:
+          SCENARIO_OUTCOME: ${{ steps.scenarios.outcome }}
+        run: node scripts/browser-evidence.mjs
+      - name: Upload browser evidence and traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/e2e/
+          if-no-files-found: error
+          retention-days: 7
