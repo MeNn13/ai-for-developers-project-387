@@ -1,5 +1,7 @@
 ﻿import { trustedHuman } from './opencode-publish.mjs'
 
+import { trustedOrigin } from './implementation-origin.mjs'
+
 const repository = 'MeNn13/ai-for-developers-project-387'
 const workflows = ['.github/workflows/opencode.yml', '.github/workflows/implementation-publish.yml']
 const sha = /^[a-f0-9]{40}$/
@@ -27,8 +29,9 @@ export async function admit(surface, event, api, trust) {
   const current = await api(`/actions/runs/${trust.runId}`)
   if (
     !workflows.includes(current.path) ||
-    current.head_branch !== 'main' ||
-    current.head_sha !== trust.trustedSha ||
+    current.event !== surface ||
+    !(await trustedOrigin(current, api, trust.trustedSha)) ||
+    (surface !== 'pull_request_review_comment' && current.head_sha !== trust.trustedSha) ||
     current.repository?.full_name !== repository ||
     current.run_attempt !== trust.attempt
   )
@@ -52,7 +55,7 @@ export async function admit(surface, event, api, trust) {
   for (const run of runs) {
     if (!workflows.includes(run.path)) continue
     if (
-      run.head_branch !== 'main' ||
+      !(await trustedOrigin(run, api, trust.trustedSha)) ||
       run.repository?.full_name !== repository ||
       !sha.test(run.head_sha) ||
       !Number.isSafeInteger(run.run_attempt) ||

@@ -3,7 +3,7 @@ import test from 'node:test'
 import { admit } from './implementation-admission.mjs'
 
 const repo = 'MeNn13/ai-for-developers-project-387'
-function fixture(prior = []) {
+function fixture(prior = [], surface = 'issue_comment') {
   const event = {
     action: 'created',
     repository: { full_name: repo },
@@ -16,12 +16,17 @@ function fixture(prior = []) {
       author_association: 'OWNER',
     },
   }
+  if (surface === 'pull_request_review_comment') {
+    delete event.issue
+    event.pull_request = { number: 50 }
+  }
   const run = (id, attempt = 1) => ({
     id,
     run_attempt: attempt,
     path: '.github/workflows/opencode.yml',
-    head_branch: 'main',
-    head_sha: 'a'.repeat(40),
+    event: surface,
+    head_branch: surface === 'issue_comment' ? 'main' : 'spec/38',
+    head_sha: (surface === 'issue_comment' ? 'a' : 'b').repeat(40),
     repository: { full_name: repo },
     status: 'completed',
     created_at: '2026-11-15T01:00:00Z',
@@ -31,6 +36,10 @@ function fixture(prior = []) {
   const trust = { runId: 100, attempt: 1, appId: 123, trustedSha: 'a'.repeat(40) }
   const api = async (path) => {
     calls.push(path)
+    if (path.startsWith('/git/commits/'))
+      return { parents: [{ sha: 'a'.repeat(40) }, { sha: 'd'.repeat(40) }] }
+    if (path.startsWith('/compare/')) return { status: 'ahead' }
+    if (path.startsWith('/contents/')) return { sha: 'c'.repeat(40) }
     if (path === '/pulls/50')
       return {
         number: 50,
@@ -62,7 +71,10 @@ function fixture(prior = []) {
 test('both comment surfaces share three admissions; the fourth never calls execution', async () => {
   for (const surface of ['issue_comment', 'pull_request_review_comment']) {
     for (let count = 0; count <= 3; count++) {
-      const f = fixture(Array.from({ length: count }, (_, i) => ({ id: i + 1 })))
+      const f = fixture(
+        Array.from({ length: count }, (_, i) => ({ id: i + 1 })),
+        surface,
+      )
       let executions = 0
       const result = await admit(surface, f.event, f.api, f.trust)
       if (result.allowed) executions++
@@ -70,6 +82,30 @@ test('both comment surfaces share three admissions; the fourth never calls execu
       assert.equal(result.reason, count < 3 ? 'admitted' : 'limit_exhausted')
     }
   }
+})
+
+test('inline merge-ref runs are trusted by workflow identity, including shared historical budget', async () => {
+  const inline = {
+    id: 1,
+    event: 'pull_request_review_comment',
+    head_branch: 'spec/38',
+    head_sha: 'b'.repeat(40),
+  }
+  const f = fixture([inline, { ...inline, id: 2 }, { id: 3 }], 'pull_request_review_comment')
+  const original = f.api
+  const api = async (path) =>
+    path === '/actions/runs/100'
+      ? { ...(await original(path)), ...inline, id: 100 }
+      : original(path)
+  assert.equal(
+    (await admit('pull_request_review_comment', f.event, api, f.trust)).reason,
+    'limit_exhausted',
+  )
+  const forged = async (path) =>
+    path.startsWith('/contents/') && path.endsWith('b'.repeat(40))
+      ? { sha: 'd'.repeat(40) }
+      : api(path)
+  await assert.rejects(admit('pull_request_review_comment', f.event, forged, f.trust), /history/)
 })
 test('partial rerun counts old attempts, while multiple stages of current attempt cost once', async () => {
   const f = fixture([{ id: 100, run_attempt: 3 }])

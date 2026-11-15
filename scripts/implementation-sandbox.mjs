@@ -3,7 +3,8 @@ import { resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 // Candidate code can write build outputs, never the checkout, evidence or runner command files.
-const root = process.cwd()
+const root = resolve(process.env.REPAIR_CANDIDATE_ROOT ?? process.cwd())
+process.chdir(root)
 const writable = ['artifacts', 'frontend/dist', 'frontend/node_modules/.vite']
 for (const entry of readdirSync('backend', { withFileTypes: true })) {
   if (entry.isDirectory())

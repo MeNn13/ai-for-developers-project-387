@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { admit } from './implementation-admission.mjs'
 import { allowedFile } from './implementation-publish.mjs'
 import { prepare } from './opencode.mjs'
+import { trustedOrigin } from './implementation-origin.mjs'
 
 const repository = 'MeNn13/ai-for-developers-project-387'
 const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
@@ -39,7 +40,7 @@ export async function repairContext(eventName, event, previous, original, github
     ['.github/workflows/opencode.yml', '.github/workflows/implementation-publish.yml'].includes(
       prior.path,
     ) &&
-      prior.head_branch === 'main' &&
+      (await trustedOrigin(prior, github, trust.trustedSha)) &&
       prior.repository?.full_name === repository,
   )
   check(
@@ -134,9 +135,27 @@ function git(args, options = {}) {
   check(child.status === 0)
   return child.stdout.trim()
 }
+async function baseline() {
+  const context = await read('context')
+  check(git(['rev-parse', 'HEAD']) === context.expectedHead)
+  check(git(['status', '--porcelain', '--untracked-files=no']) === '')
+  const base = git(['merge-base', context.trustedSha, context.expectedHead])
+  const changes = git(['diff', '--no-renames', '--name-only', base, context.expectedHead])
+    .split('\n')
+    .filter(Boolean)
+  check(changes.every((path) => allowedFile({ path, mode: '100644', content: null })))
+  // A permitted filename must still be an ordinary file, never a symlink/submodule.
+  for (const path of changes) {
+    const entry = git(['ls-tree', context.expectedHead, '--', path])
+    check(entry === '' || entry.startsWith('100644 blob '))
+  }
+  return context
+}
 async function main() {
   const command = process.argv[2]
   await mkdir(io(), { recursive: true })
+  if (['baseline', 'candidate', 'verify'].includes(command) && process.env.REPAIR_CANDIDATE_ROOT)
+    process.chdir(process.env.REPAIR_CANDIDATE_ROOT)
   if (command === 'gate') {
     const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'))
     const decision = await admit(process.env.GITHUB_EVENT_NAME, event, api, {
@@ -163,7 +182,7 @@ async function main() {
           run.path,
         ) &&
         run.repository?.full_name === repository &&
-        run.head_branch === 'main' &&
+        (await trustedOrigin(run, api, process.env.TRUSTED_SHA)) &&
         Number.isSafeInteger(previous.sourceRunId),
     )
     await appendFile(process.env.GITHUB_OUTPUT, `source=${previous.sourceRunId}\n`)
@@ -219,14 +238,11 @@ async function main() {
     }
     check(finished)
     await write('reply', validateRepair(JSON.parse(text), await read('context')))
+  } else if (command === 'baseline') {
+    await baseline()
   } else if (command === 'candidate') {
-    const context = await read('context')
+    const context = await baseline()
     const reply = validateRepair(await read('reply'), context)
-    check(git(['rev-parse', 'HEAD']) === context.expectedHead)
-    const changes = git(['diff', '--name-only', context.trustedSha, context.expectedHead])
-      .split('\n')
-      .filter(Boolean)
-    check(changes.every((path) => allowedFile({ path, mode: '100644', content: null })))
     for (const file of reply.files) {
       if (file.content === null) await unlink(file.path)
       else {

@@ -40,6 +40,6 @@ jobs:
                 const checked = (await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}', { ...context.repo, run_id: run.id, attempt_number: attempt })).data;
                 await completion(checked, async (method, route, data = {}) => {
                   return (await github.request(`${method} /repos/{owner}/{repo}${route}`, { ...context.repo, ...data })).data;
-                }, Number(process.env.PUBLISH_APP_BOT_ID));
+                }, Number(process.env.PUBLISH_APP_BOT_ID), context.sha);
               }
             }

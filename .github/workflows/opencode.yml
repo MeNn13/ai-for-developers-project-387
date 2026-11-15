@@ -1,4 +1,4 @@
-﻿name: opencode
+name: opencode
 
 on:
   issues:
@@ -51,6 +51,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: steps.context.outputs.allowed == 'true'
         with:
+          overwrite: true
           name: opencode-context
           path: ${{ runner.temp }}/opencode-context/context.json
           retention-days: 1
@@ -93,12 +94,14 @@ jobs:
           OPENCODE_IO: ${{ runner.temp }}/opencode-io
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
+          overwrite: true
           name: opencode-reply
           path: ${{ runner.temp }}/opencode-io/reply.json
           retention-days: 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure() && !cancelled()
         with:
+          overwrite: true
           name: opencode-diagnostic
           path: ${{ runner.temp }}/opencode-io/diagnostic.json
           if-no-files-found: ignore
@@ -299,12 +302,14 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: steps.gate.outputs.allowed == 'true'
         with:
+          overwrite: true
           name: implementation-context
           path: ${{ runner.temp }}/repair/context.json
           retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: steps.gate.outputs.allowed == 'true'
         with:
+          overwrite: true
           name: implementation-prompt
           path: ${{ runner.temp }}/repair/prompt.json
           retention-days: 7
@@ -381,6 +386,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: steps.gate.outputs.allowed == 'true'
         with:
+          overwrite: true
           name: implementation-reply
           path: ${{ runner.temp }}/repair/reply.json
           retention-days: 7
@@ -439,13 +445,18 @@ jobs:
           EXPECTED_HEAD: ${{ needs.implementation-context.outputs.head }}
         run: |
           git fetch origin "$EXPECTED_HEAD"
-          git checkout --detach "$EXPECTED_HEAD"
+          echo "REPAIR_CANDIDATE_ROOT=$RUNNER_TEMP/repair-candidate" >> "$GITHUB_ENV"
+          git worktree add --detach "$RUNNER_TEMP/repair-candidate" "$EXPECTED_HEAD"
+      - name: Validate protected baseline before candidate execution
+        if: steps.gate.outputs.allowed == 'true'
+        run: node scripts/implementation-repair.mjs baseline
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         if: steps.gate.outputs.allowed == 'true'
         with:
           version: '2026.10.12'
       - name: Install trusted dependencies and browser
         if: steps.gate.outputs.allowed == 'true'
+        working-directory: ${{ runner.temp }}/repair-candidate
         run: |
           mise trust
           mise run install
@@ -464,12 +475,14 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: steps.gate.outputs.allowed == 'true'
         with:
+          overwrite: true
           name: implementation-result
           path: ${{ runner.temp }}/repair/result.json
           retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: steps.gate.outputs.allowed == 'true'
         with:
+          overwrite: true
           name: implementation-verification
           path: ${{ runner.temp }}/repair/verification.json
           retention-days: 7
@@ -556,6 +569,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
+          overwrite: true
           name: implementation-publication
           path: ${{ runner.temp }}/repair/publication.json
           if-no-files-found: ignore

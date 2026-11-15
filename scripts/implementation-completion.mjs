@@ -1,8 +1,9 @@
+import { trustedOrigin } from './implementation-origin.mjs'
 const repository = 'MeNn13/ai-for-developers-project-387'
-export async function completion(run, api, appId) {
+export async function completion(run, api, appId, trustedSha = 'main') {
   if (
     run.path !== '.github/workflows/opencode.yml' ||
-    run.head_branch !== 'main' ||
+    !(await trustedOrigin(run, (path) => api('GET', path), trustedSha)) ||
     run.repository?.full_name !== repository ||
     !['issue_comment', 'pull_request_review_comment'].includes(run.event) ||
     run.status !== 'completed' ||

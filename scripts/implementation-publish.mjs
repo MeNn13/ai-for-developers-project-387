@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
+import { trustedOrigin } from './implementation-origin.mjs'
 
 const repository = 'MeNn13/ai-for-developers-project-387'
 const shaPattern = /^[a-f0-9]{40}$/
@@ -47,8 +48,8 @@ export async function publishImplementation(
         ['.github/workflows/opencode-implement.yml', '.github/workflows/opencode.yml'].includes(
           run.path,
         ) &&
-        run.head_sha === trust.trustedSha &&
-        run.head_branch === 'main' &&
+        (await trustedOrigin(run, (path) => api('GET', path), trust.trustedSha)) &&
+        (context.repair || run.head_sha === trust.trustedSha) &&
         run.repository?.full_name === repository &&
         (run.conclusion === 'success' ||
           (run.path === '.github/workflows/opencode.yml' && run.status === 'in_progress')),
@@ -194,12 +195,15 @@ export async function publishImplementation(
         ['.github/workflows/implementation-publish.yml', '.github/workflows/opencode.yml'].includes(
           priorRun.path,
         ) &&
-          priorRun.head_branch === 'main' &&
+          (await trustedOrigin(priorRun, (path) => api('GET', path), trust.trustedSha)) &&
           priorRun.repository?.full_name === repository &&
           shaPattern.test(priorRun.head_sha),
         'publication_history',
       )
-      if (priorRun.head_sha !== trust.trustedSha) {
+      if (
+        priorRun.event !== 'pull_request_review_comment' &&
+        priorRun.head_sha !== trust.trustedSha
+      ) {
         const comparison = await api('GET', `/compare/${priorRun.head_sha}...${trust.trustedSha}`)
         requireValue(comparison.status === 'ahead', 'publication_history')
       }

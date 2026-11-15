@@ -455,3 +455,66 @@ test('verified ready false converts an existing ready PR back to draft', async (
   assert.match(mutations[0].query, /convertPullRequestToDraft/)
   assert.deepEqual(mutations[0].variables, { id: 'PR_50' })
 })
+
+test('publisher accepts inline origin and prior inline receipt but rejects changed workflow bytes', async () => {
+  const f = fixture()
+  let previous
+  await publishImplementation(result, context, f.api, { ...trust(), publisherRunId: 8 }, (r) => {
+    previous = r
+  })
+  const repairedContext = { ...context, expectedHead: next, repair: { number: 50 } }
+  const repaired = {
+    ...result,
+    candidateSha: 'c'.repeat(40),
+    contextDigest: createHash('sha256').update(JSON.stringify(repairedContext)).digest('hex'),
+  }
+  const trusted = {
+    ...trust(),
+    runAttempt: 2,
+    publisherRunId: 7,
+    previousRunId: 8,
+    previous,
+    verification: {
+      ...trust().verification,
+      sha: repaired.candidateSha,
+      resultDigest: createHash('sha256').update(JSON.stringify(repaired)).digest('hex'),
+    },
+  }
+  let forged = true
+  const api = async (method, path, data) => {
+    if (path === '/actions/runs/7' || path === '/actions/runs/8')
+      return {
+        id: Number(path.split('/').at(-1)),
+        path: '.github/workflows/opencode.yml',
+        event: 'pull_request_review_comment',
+        head_branch: 'spec/38',
+        head_sha: 'd'.repeat(40),
+        repository: { full_name: 'MeNn13/ai-for-developers-project-387' },
+        status: 'in_progress',
+      }
+    if (path.startsWith('/git/commits/' + 'd'.repeat(40)))
+      return { parents: [{ sha }, { sha: next }] }
+    if (path.startsWith('/compare/')) return { status: 'ahead' }
+    if (path.startsWith('/contents/'))
+      return { sha: forged && path.endsWith('d'.repeat(40)) ? next : sha }
+    if (path.includes('/attempts/2/jobs'))
+      return {
+        total_count: 1,
+        jobs: [
+          {
+            name: 'implementation-publish-pr-50',
+            steps: [{ name: 'implementation-admitted', conclusion: 'success' }],
+          },
+        ],
+      }
+    if (path === `/git/commits/${next}`) return { tree: { sha } }
+    if (path === '/git/commits') return { sha: repaired.candidateSha }
+    return f.api(method, path, data)
+  }
+  await assert.rejects(publishImplementation(repaired, repairedContext, api, trusted), /origin/)
+  forged = false
+  assert.equal(
+    (await publishImplementation(repaired, repairedContext, api, trusted)).head,
+    repaired.candidateSha,
+  )
+})
