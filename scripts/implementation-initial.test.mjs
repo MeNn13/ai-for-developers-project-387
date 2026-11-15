@@ -278,6 +278,7 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
         env: {
           ...process.env,
           NODE_OPTIONS: '--import ' + pathToFileURL(preload).href,
+          GITHUB_RUN_ATTEMPT: '1',
           INITIAL_IO: io,
           INITIAL_CANDIDATE_ROOT: candidate,
           OPENCODE_API_KEY: 'fake',
