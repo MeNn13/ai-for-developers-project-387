@@ -55,7 +55,6 @@ export async function admit(surface, event, api, trust) {
   for (const run of runs) {
     if (!workflows.includes(run.path)) continue
     if (
-      !(await trustedOrigin(run, api, trust.trustedSha)) ||
       run.repository?.full_name !== repository ||
       !sha.test(run.head_sha) ||
       !Number.isSafeInteger(run.run_attempt) ||
@@ -73,6 +72,7 @@ export async function admit(surface, event, api, trust) {
           j.steps?.some((s) => s.name === 'implementation-admitted' && s.conclusion === 'success'),
       )
       if (!admitted) continue
+      if (!(await trustedOrigin(run, api, trust.trustedSha))) throw new Error('history')
       if (
         ![run.created_at, run.updated_at, event.comment.created_at].every((s) =>
           Number.isFinite(Date.parse(s)),

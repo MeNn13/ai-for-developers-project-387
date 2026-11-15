@@ -151,3 +151,23 @@ test('missing history and forged workflow metadata fail closed', async () => {
     await assert.rejects(admit('issue_comment', f.event, f.api, f.trust), /history/)
   }
 })
+
+test('ordinary inline discussion and other PR admissions cannot poison repair history', async () => {
+  const f = fixture([{ id: 1, event: 'pull_request_review_comment', head_branch: 'feat/human' }])
+  const original = f.api
+  for (const jobs of [
+    [],
+    [
+      {
+        name: 'implementation-context-pr-99',
+        steps: [{ name: 'implementation-admitted', conclusion: 'success' }],
+      },
+    ],
+  ]) {
+    const api = (path) =>
+      path.includes('/runs/1/attempts/') ? { total_count: jobs.length, jobs } : original(path)
+    assert.equal((await admit('issue_comment', f.event, api, f.trust)).reason, 'admitted')
+  }
+  // A relevant forged marker must still be rejected after filtering unrelated jobs.
+  await assert.rejects(admit('issue_comment', f.event, f.api, f.trust), /history/)
+})

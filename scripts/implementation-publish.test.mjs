@@ -518,3 +518,89 @@ test('publisher accepts inline origin and prior inline receipt but rejects chang
     repaired.candidateSha,
   )
 })
+
+test('publisher-only rerun recovers the current run checkpoint after branch write and PR failure', async () => {
+  const f = fixture()
+  let previous
+  await publishImplementation(result, context, f.api, { ...trust(), publisherRunId: 8 }, (r) => {
+    previous = r
+  })
+  const repairedContext = { ...context, expectedHead: next, repair: { number: 50 } }
+  const repaired = {
+    ...result,
+    candidateSha: 'c'.repeat(40),
+    contextDigest: createHash('sha256').update(JSON.stringify(repairedContext)).digest('hex'),
+  }
+  const trusted = {
+    ...trust(),
+    runAttempt: 1,
+    publisherRunId: 7,
+    previousRunId: 8,
+    previous,
+    verification: {
+      ...trust().verification,
+      sha: repaired.candidateSha,
+      resultDigest: createHash('sha256').update(JSON.stringify(repaired)).digest('hex'),
+    },
+  }
+  let failing = true
+  let checkpoint
+  const api = async (method, path, data) => {
+    if (path === '/actions/runs/7')
+      return {
+        ...(await f.api(method, path, data)),
+        path: '.github/workflows/opencode.yml',
+        status: 'in_progress',
+      }
+    if (path === '/actions/runs/8')
+      return {
+        path: '.github/workflows/implementation-publish.yml',
+        head_sha: sha,
+        head_branch: 'main',
+        repository: { full_name: 'MeNn13/ai-for-developers-project-387' },
+      }
+    if (path.includes('/attempts/'))
+      return {
+        total_count: 1,
+        jobs: [
+          {
+            name: 'implementation-publish-pr-50',
+            steps: [{ name: 'implementation-admitted', conclusion: 'success' }],
+          },
+        ],
+      }
+    if (path === `/git/commits/${next}`) return { tree: { sha } }
+    if (path === '/git/commits') return { sha: repaired.candidateSha }
+    if (path === '/pulls/50' && method === 'PATCH' && failing)
+      throw new Error('PR operation failed')
+    return f.api(method, path, data)
+  }
+  await assert.rejects(
+    publishImplementation(repaired, repairedContext, api, trusted, (r) => {
+      checkpoint = r
+    }),
+    /github_api/,
+  )
+  assert.equal(checkpoint.head, repaired.candidateSha)
+  assert.equal(checkpoint.publisherRunId, 7)
+  failing = false
+  const writes = () =>
+    f.calls.filter((c) => c.method === 'PATCH' && c.path.startsWith('/git/refs/')).length
+  const before = writes()
+  await assert.rejects(
+    publishImplementation(repaired, repairedContext, api, {
+      ...trusted,
+      runAttempt: 2,
+      recovery: { ...checkpoint, publisherRunId: 99 },
+    }),
+    /branch_ownership/,
+  )
+  const recovered = await publishImplementation(repaired, repairedContext, api, {
+    ...trusted,
+    runAttempt: 2,
+    recovery: checkpoint,
+  })
+  assert.equal(recovered.head, repaired.candidateSha)
+  assert.equal(recovered.pr, 50)
+  assert.equal(writes(), before)
+})

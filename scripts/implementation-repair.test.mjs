@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync, execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { validateRepair } from './implementation-repair.mjs'
+import { validateRepair, recoveryArtifact } from './implementation-repair.mjs'
 import { completion } from './implementation-completion.mjs'
 
 const reply = {
@@ -34,10 +34,47 @@ test('full and publisher-only reruns replace run-scoped artifacts without wildca
     }
     assert.ok(uploaded.has('implementation-publication'))
     for (const step of steps.filter((s) => s.includes('uses: actions/download-artifact@'))) {
-      assert.match(step, /\n          name: /)
-      assert.doesNotMatch(step, /pattern:|merge-multiple:/)
+      assert.match(step, /\n          (name|artifact-ids): /)
+      assert.doesNotMatch(step, /pattern:/)
+      if (step.includes('merge-multiple:'))
+        assert.match(step, /artifact-ids: \$\{\{ steps.recovery.outputs.artifact \}\}/)
     }
   }
+})
+
+test('publisher recovery downloads only one exact checkpoint from the current run', async () => {
+  const artifact = {
+    id: 901,
+    name: 'implementation-publication',
+    expired: false,
+    workflow_run: { id: 7 },
+  }
+  const api = async (path) => {
+    assert.equal(path, '/actions/runs/7/artifacts?name=implementation-publication&per_page=100')
+    return { total_count: 1, artifacts: [artifact] }
+  }
+  assert.equal(await recoveryArtifact(api, 7), 901)
+  assert.equal(await recoveryArtifact(async () => ({ total_count: 0, artifacts: [] }), 7), null)
+  for (const response of [
+    { total_count: 2, artifacts: [artifact] },
+    { total_count: 2, artifacts: [artifact, artifact] },
+    { total_count: 1, artifacts: [{ ...artifact, expired: true }] },
+    { total_count: 1, artifacts: [{ ...artifact, workflow_run: { id: 8 } }] },
+    { total_count: 1, artifacts: [{ ...artifact, name: 'forged' }] },
+  ])
+    await assert.rejects(
+      recoveryArtifact(async () => response, 7),
+      /repair_input/,
+    )
+  const workflow = readFileSync(
+    new URL('../.github/workflows/opencode.yml', import.meta.url),
+    'utf8',
+  )
+  const publisher = workflow.slice(workflow.indexOf('\n  implementation-publish:'))
+  assert.match(publisher, /run: node scripts\/implementation-repair.mjs recovery/)
+  assert.match(publisher, /artifact-ids: \$\{\{ steps.recovery.outputs.artifact \}\}/)
+  assert.match(publisher, /RECOVERY_ARTIFACT_ID: \$\{\{ steps.recovery.outputs.artifact \}\}/)
+  assert.ok(publisher.indexOf('Locate current run') < publisher.indexOf('Mint repository-scoped'))
 })
 test('repair model has no write token and emits bounded file data with draft readiness', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'repair-model-'))

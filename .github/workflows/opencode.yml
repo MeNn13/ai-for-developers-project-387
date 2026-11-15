@@ -548,6 +548,18 @@ jobs:
           path: ${{ runner.temp }}/repair/previous
           run-id: ${{ needs.implementation-context.outputs.previous }}
           github-token: ${{ github.token }}
+      - name: Locate current run publication checkpoint
+        id: recovery
+        if: steps.gate.outputs.allowed == 'true' && github.run_attempt > 1
+        run: node scripts/implementation-repair.mjs recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: steps.gate.outputs.allowed == 'true' && steps.recovery.outputs.artifact != ''
+        with:
+          artifact-ids: ${{ steps.recovery.outputs.artifact }}
+          merge-multiple: true # Exactly one validated artifact ID from this run.
+          path: ${{ runner.temp }}/repair/recovery
       - name: Mint repository-scoped installation token
         id: installation
         if: steps.gate.outputs.allowed == 'true'
@@ -563,6 +575,7 @@ jobs:
           PUBLISH_IO: ${{ runner.temp }}/repair
           SOURCE_RUN_ID: ${{ github.run_id }}
           PREVIOUS_RUN_ID: ${{ needs.implementation-context.outputs.previous }}
+          RECOVERY_ARTIFACT_ID: ${{ steps.recovery.outputs.artifact }}
       - name: Revoke installation token
         if: always() && steps.installation.outcome == 'success'
         run: node scripts/implementation-app.mjs revoke

@@ -130,6 +130,24 @@ export function validateRepair(reply, context) {
     ready: false,
   }
 }
+export async function recoveryArtifact(github, runId) {
+  check(Number.isSafeInteger(runId) && runId > 0)
+  const response = await github(
+    `/actions/runs/${runId}/artifacts?name=implementation-publication&per_page=100`,
+  )
+  check(Array.isArray(response.artifacts) && response.total_count === response.artifacts.length)
+  check(response.artifacts.length <= 1)
+  const artifact = response.artifacts[0]
+  if (!artifact) return null
+  check(
+    artifact.name === 'implementation-publication' &&
+      !artifact.expired &&
+      Number.isSafeInteger(artifact.id) &&
+      artifact.id > 0 &&
+      artifact.workflow_run?.id === runId,
+  )
+  return artifact.id
+}
 function git(args, options = {}) {
   const child = spawnSync('git', args, { encoding: 'utf8', ...options })
   check(child.status === 0)
@@ -173,6 +191,9 @@ async function main() {
       check(match && Number.isSafeInteger(Number(match[1])))
       await appendFile(process.env.GITHUB_OUTPUT, `previous=${match[1]}\nhead=${decision.head}\n`)
     }
+  } else if (command === 'recovery') {
+    const artifact = await recoveryArtifact(api, Number(process.env.GITHUB_RUN_ID))
+    if (artifact) await appendFile(process.env.GITHUB_OUTPUT, `artifact=${artifact}\n`)
   } else if (command === 'receipt') {
     const previous = await read('previous/publication')
     const run = await api(`/actions/runs/${previous.publisherRunId}`)

@@ -179,12 +179,20 @@ export async function publishImplementation(
         'pr_ownership',
       )
     const payload = digest({ result, context })
-    const previous = trust.previous
+    const previous = trust.recovery ?? trust.previous
+    if (trust.recovery)
+      requireValue(
+        context.repair &&
+          previous.publisherRunId === trust.publisherRunId &&
+          previous.sourceRunId === trust.runId,
+        'branch_ownership',
+      )
     if (head) {
       state = 'possible'
       requireValue(
         previous &&
-          previous.publisherRunId === trust.previousRunId &&
+          previous.publisherRunId ===
+            (trust.recovery ? trust.publisherRunId : trust.previousRunId) &&
           previous.branch === branch &&
           previous.head === head.object.sha &&
           previous.appId === trust.appId,
@@ -359,6 +367,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       trust.previous = await read('previous', 'publication')
       trust.previousRunId = Number(process.env.PREVIOUS_RUN_ID)
     }
+    if (process.env.RECOVERY_ARTIFACT_ID) trust.recovery = await read('recovery', 'publication')
     await publishImplementation(
       await read('result'),
       await read('context'),
