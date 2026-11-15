@@ -167,8 +167,23 @@ async function main() {
   await write('integrations', records)
   if (!first) {
     for (const axis of ['Standards', 'Spec']) {
+      // The read-only CLI cannot run Git. Supply the actual base-to-head change
+      // as data, refreshing it after any repair by the preceding review session.
+      const reviewContext = {
+        base: context.base,
+        head: git(['rev-parse', 'HEAD']),
+        diff: git([
+          'diff',
+          '--no-ext-diff',
+          '--no-textconv',
+          '--no-renames',
+          '--unified=80',
+          context.base,
+          'HEAD',
+        ]),
+      }
       const review = model(
-        { ...context, integrations: records },
+        { ...context, integrations: records, review: reviewContext },
         `Perform independent ${axis} review of entire integrated graph against base ${context.base}. Read changes and approved context. Return JSON {findings:[{path,line,conditions,consequences}],risk,rollback,repair:null|{version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}}. Summarize consequences and risk of ENTIRE change; explain whether reverting code suffices for data. Provide only confirmed defects. No writes or shell. Review is separate from external GitHub author review.`,
       )
       requireValue(Array.isArray(review.findings))

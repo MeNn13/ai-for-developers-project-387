@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict'
+import assert from 'node:assert/strict'
 import test from 'node:test'
 import { initialContext, initialAdmission } from './implementation-initial.mjs'
 import { prepare } from './opencode.mjs'
@@ -30,7 +30,7 @@ function api(path) {
   if (path === '/issues/2/sub_issues?per_page=100') return [{ number: 3 }, { number: 4 }]
   if (path === '/issues/3/dependencies/blocked_by?per_page=100') return []
   if (path === '/issues/4/dependencies/blocked_by?per_page=100')
-    return [{ number: 3, state: 'OPEN' }]
+    return [{ number: 3, state: 'open' }]
   if (/^\/issues\/\d+\/comments/.test(path)) return []
   if (number)
     return {
@@ -38,7 +38,7 @@ function api(path) {
       id: number,
       title: `Issue ${number}`,
       body: 'Approved requirements',
-      state: 'OPEN',
+      state: 'open',
     }
   throw new Error('unavailable')
 }
@@ -78,7 +78,7 @@ test('missing consent, unavailable requirements and cyclic or incomplete native 
       event,
       (path) =>
         path === '/issues/3/dependencies/blocked_by?per_page=100'
-          ? [{ number: 4, state: 'OPEN' }]
+          ? [{ number: 4, state: 'open' }]
           : api(path),
       trust,
     ),
@@ -110,6 +110,39 @@ test('missing consent, unavailable requirements and cyclic or incomplete native 
       trust,
     ),
     /initial_approval/,
+  )
+})
+
+test('REST open issues accept closed external blockers and reject open or unknown external states', async () => {
+  const context = await initialContext(
+    event,
+    (path) =>
+      path === '/issues/3/dependencies/blocked_by?per_page=100'
+        ? [{ number: 9, state: 'closed' }]
+        : api(path),
+    trust,
+  )
+  assert.deepEqual(context.graph[0], { number: 3, blockedBy: [] })
+  for (const state of ['open', 'CLOSED', undefined]) {
+    await assert.rejects(
+      initialContext(
+        event,
+        (path) =>
+          path === '/issues/3/dependencies/blocked_by?per_page=100'
+            ? [{ number: 9, state }]
+            : api(path),
+        trust,
+      ),
+      /initial_blockers/,
+    )
+  }
+  await assert.rejects(
+    initialContext(
+      event,
+      (path) => (path === '/issues/2' ? { ...api(path), state: 'closed' } : api(path)),
+      trust,
+    ),
+    /initial_context/,
   )
 })
 
@@ -259,7 +292,7 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
   const fake = join(dir, 'model.mjs')
   writeFileSync(
     fake,
-    `import assert from 'node:assert/strict'; let input=''; for await (const c of process.stdin) input+=c; assert.equal(process.env.GH_TOKEN, undefined); assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY,undefined); const context=JSON.parse(input.split('UNTRUSTED APPROVED CONTEXT:\\n')[1]); const n=context.activeTicket?.number; const reply=n?{version:1,message:'feat: implement ticket (#'+n+')',files:[{path:'frontend/src/ticket'+n+'.ts',mode:'100644',content:'export const ticket'+n+' = true\\n'}],risk:'UI consequences',rollback:'Revert; no persistent data'}:{findings:[],risk:'Entire UI change',rollback:'Revert; no persistent data',repair:null}; console.log(JSON.stringify({type:'text',part:{text:JSON.stringify(reply)}}));console.log(JSON.stringify({type:'step_finish',part:{reason:'stop'}}));`,
+    `import assert from 'node:assert/strict'; let input=''; for await (const c of process.stdin) input+=c; assert.equal(process.env.GH_TOKEN, undefined); assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY,undefined); const context=JSON.parse(input.split('UNTRUSTED APPROVED CONTEXT:\\n')[1]); const n=context.activeTicket?.number; if(!n){assert.equal(context.review.base,context.base);assert.equal(context.review.head,context.integrations.at(-1).sha);assert.ok(context.review.diff.includes('diff --git a/frontend/src/ticket3.ts'));assert.ok(context.review.diff.includes('diff --git a/frontend/src/ticket4.ts'));assert.ok(context.review.diff.includes('+export const ticket3 = true'));assert.ok(context.review.diff.includes('+export const ticket4 = true'));} const reply=n?{version:1,message:'feat: implement ticket (#'+n+')',files:[{path:'frontend/src/ticket'+n+'.ts',mode:'100644',content:'export const ticket'+n+' = true\\n'}],risk:'UI consequences',rollback:'Revert; no persistent data'}:{findings:[],risk:'Entire UI change',rollback:'Revert; no persistent data',repair:null}; console.log(JSON.stringify({type:'text',part:{text:JSON.stringify(reply)}}));console.log(JSON.stringify({type:'step_finish',part:{reason:'stop'}}));`,
   )
   const preload = join(dir, 'adapter.mjs')
   // Only the external model and Linux check adapter are fake; Git and candidate construction run.

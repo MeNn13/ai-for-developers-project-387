@@ -140,7 +140,7 @@ export async function publishImplementation(
         )
         requireValue(
           blockers.length < 100 &&
-            blockers.every((b) => context.tickets.includes(b.number) || b.state === 'CLOSED') &&
+            blockers.every((b) => context.tickets.includes(b.number) || b.state === 'closed') &&
             JSON.stringify(
               blockers
                 .filter((b) => context.tickets.includes(b.number))

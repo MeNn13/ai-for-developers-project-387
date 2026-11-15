@@ -60,7 +60,7 @@ export async function initialContext(event, api, trust) {
     check(
       issue.number === number &&
         !issue.pull_request &&
-        issue.state === 'OPEN' &&
+        issue.state === 'open' &&
         typeof issue.body === 'string' &&
         issue.body.length > 0,
       'initial_context',
@@ -86,7 +86,7 @@ export async function initialContext(event, api, trust) {
     const blockers = await api(`/issues/${number}/dependencies/blocked_by?per_page=100`)
     check(
       blockers.length < 100 &&
-        blockers.every((b) => tickets.includes(b.number) || b.state === 'CLOSED'),
+        blockers.every((b) => tickets.includes(b.number) || b.state === 'closed'),
       'initial_blockers',
     )
     graph.push({

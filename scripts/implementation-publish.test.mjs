@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict'
+import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
 import { publishImplementation } from './implementation-publish.mjs'
@@ -154,12 +154,14 @@ test('initial in-progress producer publishes first draft and requires final chec
   const f = fixture()
   const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
   let final = false
+  let blockerState = 'open'
   const readyCalls = []
   const github = async (method, path, data) => {
     if (path === '/actions/runs/7')
       return { ...(await f.api(method, path, data)), status: 'in_progress', conclusion: null }
     if (path === '/issues/38/sub_issues?per_page=100') return [{ number: 40 }]
-    if (path === '/issues/40/dependencies/blocked_by?per_page=100') return []
+    if (path === '/issues/40/dependencies/blocked_by?per_page=100')
+      return [{ number: 39, state: blockerState }]
     if (path === '/actions/runs/7/jobs?per_page=100' && final)
       return {
         total_count: 2,
@@ -189,6 +191,12 @@ test('initial in-progress producer publishes first draft and requires final chec
     publisherRunId: 7,
     verification: { ...trust().verification, resultDigest: digest(draft) },
   }
+  await assert.rejects(publishImplementation(draft, initial, github, trusted), /context/)
+  assert.equal(
+    f.calls.some((call) => ['POST', 'PATCH'].includes(call.method)),
+    false,
+  )
+  blockerState = 'closed'
   const receipt = await publishImplementation(draft, initial, github, trusted)
   assert.equal(receipt.head, next)
   const finished = { ...initial, phase: 'final', expectedHead: next }
