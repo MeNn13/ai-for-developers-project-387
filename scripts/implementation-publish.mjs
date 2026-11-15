@@ -43,6 +43,11 @@ export async function publishImplementation(
       'trust',
     )
     const run = await api('GET', `/actions/runs/${trust.runId}`)
+    if (context.initial && !context.repair)
+      requireValue(
+        Number.isFinite(context.deadline) && Date.now() < context.deadline && run.run_attempt === 1,
+        'context',
+      )
     requireValue(
       run.id === trust.runId &&
         ['.github/workflows/opencode-implement.yml', '.github/workflows/opencode.yml'].includes(
@@ -52,7 +57,10 @@ export async function publishImplementation(
         (context.repair || run.head_sha === trust.trustedSha) &&
         run.repository?.full_name === repository &&
         (run.conclusion === 'success' ||
-          (run.path === '.github/workflows/opencode.yml' && run.status === 'in_progress')),
+          (['.github/workflows/opencode.yml', '.github/workflows/opencode-implement.yml'].includes(
+            run.path,
+          ) &&
+            run.status === 'in_progress')),
       'origin',
     )
     const jobs = await api('GET', `/actions/runs/${trust.runId}/jobs?per_page=100`)
@@ -76,7 +84,12 @@ export async function publishImplementation(
     }
     requireValue(
       jobs.total_count === jobs.jobs.length &&
-        ['implementation-context', 'implementation-check'].every(
+        [
+          'implementation-context',
+          context.initial && !context.repair && context.phase === 'final'
+            ? 'implementation-final-check'
+            : 'implementation-check',
+        ].every(
           (name) =>
             jobs.jobs.filter(
               (j) =>
@@ -112,6 +125,32 @@ export async function publishImplementation(
         'context',
       )
     }
+    if (context.initial && !context.repair) {
+      const children = await api('GET', `/issues/${context.spec}/sub_issues?per_page=100`)
+      requireValue(
+        children.length === context.tickets.length &&
+          children.length < 100 &&
+          context.tickets.every((n) => children.some((c) => c.number === n)),
+        'context',
+      )
+      for (const ticket of context.graph) {
+        const blockers = await api(
+          'GET',
+          `/issues/${ticket.number}/dependencies/blocked_by?per_page=100`,
+        )
+        requireValue(
+          blockers.length < 100 &&
+            blockers.every((b) => context.tickets.includes(b.number) || b.state === 'CLOSED') &&
+            JSON.stringify(
+              blockers
+                .filter((b) => context.tickets.includes(b.number))
+                .map((b) => b.number)
+                .sort(),
+            ) === JSON.stringify([...ticket.blockedBy].sort()),
+          'context',
+        )
+      }
+    }
     requireValue(
       result.version === 1 &&
         result.contextDigest === digest(context) &&
@@ -144,7 +183,8 @@ export async function publishImplementation(
     )
     requireValue(
       Array.isArray(result.files) &&
-        result.files.length > 0 &&
+        (result.files.length > 0 ||
+          (context.initial && context.phase === 'final' && result.ready)) &&
         result.files.length <= 200 &&
         result.files.every(allowedFile) &&
         new Set(result.files.map((f) => f.path.toLowerCase())).size === result.files.length &&
@@ -200,9 +240,11 @@ export async function publishImplementation(
       )
       const priorRun = await api('GET', `/actions/runs/${previous.publisherRunId}`)
       requireValue(
-        ['.github/workflows/implementation-publish.yml', '.github/workflows/opencode.yml'].includes(
-          priorRun.path,
-        ) &&
+        [
+          '.github/workflows/implementation-publish.yml',
+          '.github/workflows/opencode.yml',
+          '.github/workflows/opencode-implement.yml',
+        ].includes(priorRun.path) &&
           (await trustedOrigin(priorRun, (path) => api('GET', path), trust.trustedSha)) &&
           priorRun.repository?.full_name === repository &&
           shaPattern.test(priorRun.head_sha),

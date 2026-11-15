@@ -35,10 +35,11 @@ jobs:
             const { pathToFileURL } = require('node:url');
             const path = require('node:path');
             const { completion } = await import(pathToFileURL(path.resolve('scripts/implementation-completion.mjs')).href);
-            for await (const response of github.paginate.iterator(github.rest.actions.listWorkflowRuns, { ...context.repo, workflow_id: 'opencode.yml', status: 'completed', per_page: 100 })) {
+            const { initialCompletion } = await import(pathToFileURL(path.resolve('scripts/implementation-initial-completion.mjs')).href);
+            for (const workflow of ['opencode.yml', 'opencode-implement.yml']) for await (const response of github.paginate.iterator(github.rest.actions.listWorkflowRuns, { ...context.repo, workflow_id: workflow, status: 'completed', per_page: 100 })) {
               for (const run of response.data) for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
                 const checked = (await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}', { ...context.repo, run_id: run.id, attempt_number: attempt })).data;
-                await completion(checked, async (method, route, data = {}) => {
+                await (workflow === 'opencode.yml' ? completion : initialCompletion)(checked, async (method, route, data = {}) => {
                   return (await github.request(`${method} /repos/{owner}/{repo}${route}`, { ...context.repo, ...data })).data;
                 }, Number(process.env.PUBLISH_APP_BOT_ID), context.sha);
               }

@@ -33,6 +33,7 @@ jobs:
       allowed: ${{ steps.context.outputs.allowed }}
       commit: ${{ steps.commit.outputs.sha }}
       repair: ${{ steps.context.outputs.repair }}
+      initial: ${{ steps.context.outputs.initial }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -55,6 +56,24 @@ jobs:
           name: opencode-context
           path: ${{ runner.temp }}/opencode-context/context.json
           retention-days: 1
+
+  dispatch-initial:
+    needs: context
+    if: needs.context.outputs.initial == 'true' && vars.IMPLEMENTATION_INITIAL_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.context.outputs.commit }}
+          persist-credentials: false
+      - name: Dispatch explicit initial implementation
+        run: node scripts/implementation-initial.mjs dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   answer:
     needs: context
