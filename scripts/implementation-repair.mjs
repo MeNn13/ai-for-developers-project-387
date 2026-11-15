@@ -37,9 +37,11 @@ export async function repairContext(eventName, event, previous, original, github
   const pr = await github(`/pulls/${event.issue?.number ?? event.pull_request.number}`)
   const prior = await github(`/actions/runs/${previous.publisherRunId}`)
   check(
-    ['.github/workflows/opencode.yml', '.github/workflows/implementation-publish.yml'].includes(
-      prior.path,
-    ) &&
+    [
+      '.github/workflows/opencode.yml',
+      '.github/workflows/implementation-publish.yml',
+      '.github/workflows/opencode-implement.yml',
+    ].includes(prior.path) &&
       (await trustedOrigin(prior, github, trust.trustedSha)) &&
       prior.repository?.full_name === repository,
   )
@@ -178,9 +180,11 @@ async function main() {
     const run = await api(`/actions/runs/${previous.publisherRunId}`)
     check(
       previous.publisherRunId === Number(process.env.PREVIOUS_RUN_ID) &&
-        ['.github/workflows/opencode.yml', '.github/workflows/implementation-publish.yml'].includes(
-          run.path,
-        ) &&
+        [
+          '.github/workflows/opencode.yml',
+          '.github/workflows/implementation-publish.yml',
+          '.github/workflows/opencode-implement.yml',
+        ].includes(run.path) &&
         run.repository?.full_name === repository &&
         (await trustedOrigin(run, api, process.env.TRUSTED_SHA)) &&
         Number.isSafeInteger(previous.sourceRunId),

@@ -23,6 +23,13 @@ export async function pages(api, path) {
 
 export async function prepare(eventName, event, api, options = {}) {
   if (
+    !options.initial &&
+    eventName === 'issue_comment' &&
+    !event.issue?.pull_request &&
+    /^\s*\/(?:oc|opencode)\s+implement-spec(?:\s|$)/i.test(event.comment?.body ?? '')
+  )
+    return null
+  if (
     !options.repair &&
     event.action === 'created' &&
     (event.issue?.pull_request || event.pull_request) &&
@@ -354,6 +361,13 @@ async function main() {
       trustedHuman(event.comment ?? {}) &&
       /^\s*\/(?:oc|opencode)\s+fix(?:\s|$)/i.test(event.comment?.body ?? '')
     await appendFile(process.env.GITHUB_OUTPUT, `repair=${repair}\n`)
+    const initial =
+      process.env.GITHUB_EVENT_NAME === 'issue_comment' &&
+      event.action === 'created' &&
+      !event.issue?.pull_request &&
+      trustedHuman(event.comment ?? {}) &&
+      /^\s*\/(?:oc|opencode)\s+implement-spec(?:\s|$)/i.test(event.comment?.body ?? '')
+    await appendFile(process.env.GITHUB_OUTPUT, `initial=${initial}\n`)
     const prepared = await prepare(process.env.GITHUB_EVENT_NAME, event, github)
     await appendFile(process.env.GITHUB_OUTPUT, `allowed=${Boolean(prepared)}\n`)
     if (!prepared) return

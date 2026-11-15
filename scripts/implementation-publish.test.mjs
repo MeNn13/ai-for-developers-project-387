@@ -150,6 +150,82 @@ test('prepared implementation creates an App draft PR without executing result c
   )
 })
 
+test('initial in-progress producer publishes first draft and requires final checked phase before ready', async () => {
+  const f = fixture()
+  const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
+  let final = false
+  const readyCalls = []
+  const github = async (method, path, data) => {
+    if (path === '/actions/runs/7')
+      return { ...(await f.api(method, path, data)), status: 'in_progress', conclusion: null }
+    if (path === '/issues/38/sub_issues?per_page=100') return [{ number: 40 }]
+    if (path === '/issues/40/dependencies/blocked_by?per_page=100') return []
+    if (path === '/actions/runs/7/jobs?per_page=100' && final)
+      return {
+        total_count: 2,
+        jobs: [
+          { name: 'implementation-context', conclusion: 'success' },
+          { name: 'implementation-final-check', conclusion: 'success' },
+        ],
+      }
+    if (path === `/git/commits/${next}`) return { tree: { sha: next } }
+    if (path === '/git/commits' && final) return { sha: 'c'.repeat(40) }
+    if (path === '/graphql') {
+      readyCalls.push(data)
+      return {}
+    }
+    return f.api(method, path, data)
+  }
+  const initial = {
+    ...context,
+    initial: true,
+    phase: 'first',
+    deadline: Date.now() + 60000,
+    graph: [{ number: 40, blockedBy: [] }],
+  }
+  const draft = { ...result, contextDigest: digest(initial) }
+  const trusted = {
+    ...trust(),
+    publisherRunId: 7,
+    verification: { ...trust().verification, resultDigest: digest(draft) },
+  }
+  const receipt = await publishImplementation(draft, initial, github, trusted)
+  assert.equal(receipt.head, next)
+  const finished = { ...initial, phase: 'final', expectedHead: next }
+  const ready = {
+    ...result,
+    ready: true,
+    files: [],
+    contextDigest: digest(finished),
+    candidateSha: 'c'.repeat(40),
+  }
+  const finalTrust = {
+    ...trusted,
+    previous: receipt,
+    previousRunId: 7,
+    verification: {
+      ...trusted.verification,
+      ready: true,
+      resultDigest: digest(ready),
+      sha: ready.candidateSha,
+    },
+  }
+  await assert.rejects(publishImplementation(ready, finished, github, finalTrust), /checks/)
+  final = true
+  await publishImplementation(ready, finished, github, finalTrust)
+  assert.equal(readyCalls.length, 1)
+  assert.match(readyCalls[0].query, /markPullRequestReadyForReview/)
+  await assert.rejects(
+    publishImplementation(
+      { ...draft, contextDigest: digest({ ...initial, deadline: 0 }) },
+      { ...initial, deadline: 0 },
+      github,
+      trusted,
+    ),
+    /context/,
+  )
+})
+
 test('rejects protected files, deletion, rename targets, symlinks and path bypass before writes', async () => {
   for (const path of [
     '.github/workflows/ci.yml',
