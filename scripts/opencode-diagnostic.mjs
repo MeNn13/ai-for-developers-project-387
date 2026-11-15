@@ -211,7 +211,7 @@ const publicationReasons = {
   unknown: 'Не удалось завершить публикацию по неизвестной причине.',
 }
 
-export function failureNotice(diagnostic, run, publicationState = 'none') {
+export function failureNotice(diagnostic, run, publicationState) {
   const notice = buildFailureNotice(diagnostic, run)
   if (validDiagnostic(diagnostic) && diagnostic.code === 'publication') return notice
   const state = ['none', 'possible', 'unknown'].includes(publicationState)
@@ -270,5 +270,5 @@ function buildFailureNotice(diagnostic, run) {
     return `Итоговый ответ модели не соответствует схеме публикации. Публикация не начиналась. Код reply_schema; безопасные сведения — в артефакте opencode-diagnostic. Передайте ссылку на прогон для диагностики. [Actions](${run})`
   if (code !== 'unknown')
     return `${categories[code][1]} Публикация не начиналась. [Actions](${run})`
-  return `${categories[code][1]} Состояние публикации неизвестно (unknown). Сначала проверьте созданные issues и комментарии; слепой повтор не рекомендуется. [Actions](${run})`
+  return `${categories[code][1]} Публикация не начиналась. [Actions](${run})`
 }

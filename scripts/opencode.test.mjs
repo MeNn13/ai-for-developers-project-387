@@ -89,6 +89,22 @@ test('workflow failure notice posts only a safe comment for missing, invalid and
   }
 })
 
+test('unknown preparation diagnostics preserve independently verified publication state', () => {
+  for (const diagnostic of [
+    undefined,
+    { version: 1, code: 'unknown', stage: 'unknown' },
+    { version: 4, code: 'reply_json', stage: 'reply', details: { secret: 'fake-secret' } },
+  ]) {
+    assert.match(failureNotice(diagnostic, 'run', 'none'), /не начиналась \(none\)/)
+    assert.match(
+      failureNotice(diagnostic, 'run', 'possible'),
+      /восстановите издателя с исходным корректным артефактом/,
+    )
+    assert.match(failureNotice(diagnostic, 'run'), /Состояние публикации неизвестно/)
+    assert.doesNotMatch(failureNotice(diagnostic, 'run', 'possible'), /fake-secret|\(unknown\)/)
+  }
+})
+
 test('accepts a single whole-answer JSON fence', () => {
   for (const label of ['json', '']) {
     const text = `\`\`\`${label}\n{"version":1,"comment":"Answer"}\n\`\`\``
@@ -308,7 +324,7 @@ test('v4 is strictly validated before notices and serialization and v2 remains r
   } catch (error) {
     diagnostic = error.diagnostic
   }
-  assert.match(failureNotice(diagnostic, 'run'), /Публикация не начиналась/)
+  assert.match(failureNotice(diagnostic, 'run'), /Состояние публикации неизвестно/)
   const v2 = {
     version: 2,
     code: 'reply_json',
@@ -453,7 +469,7 @@ test('CLI fake writes only safe diagnostic on failure and no reply', async () =>
 test('failure notice accepts only exact known diagnostics and otherwise uses fallback', () => {
   const run = 'https://github.com/example/repo/actions/runs/1'
   const diagnostic = { version: 1, code: 'reply_json', stage: 'reply' }
-  assert.match(failureNotice(diagnostic, run), /Публикация не начиналась/)
+  assert.match(failureNotice(diagnostic, run), /Состояние публикации неизвестно/)
   assert.doesNotMatch(failureNotice(diagnostic, run), /частичной|исходным артефактом/)
   assert.doesNotMatch(failureNotice(diagnostic, run), /ключ|лимит/)
   for (const invalid of [
@@ -585,7 +601,10 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
           code === 'reply_schema' ? 3 : code === 'reply_json' ? 4 : 1,
         )
         if (code === 'reply_schema') {
-          assert.match(failureNotice(JSON.parse(diagnostic), 'run'), /Публикация не начиналась/)
+          assert.match(
+            failureNotice(JSON.parse(diagnostic), 'run'),
+            /Состояние публикации неизвестно/,
+          )
         }
         assert.doesNotMatch(
           diagnostic + failureNotice(JSON.parse(diagnostic), 'run'),
