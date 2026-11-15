@@ -83,7 +83,7 @@ test('v3 diagnostics reject injected fields, unknown reasons and mismatched rule
     { ...good, details: { ...good.details, rule: ['item_blockers'] } },
     { ...good, details: { ...good.details, rule: 'item_key' } },
   ]) {
-    assert.match(failureNotice(bad, 'run'), /При частичной публикации/)
+    assert.match(failureNotice(bad, 'run'), /Состояние публикации неизвестно/)
     assert.doesNotMatch(failureNotice(bad, 'run'), /fake-secret/)
     const error = new DiagnosticError('reply_schema', good.details)
     error.diagnostic = bad

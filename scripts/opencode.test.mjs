@@ -78,7 +78,7 @@ test('workflow failure notice posts only a safe comment for missing, invalid and
       assert.equal(comments.length, 1)
       assert.equal(failures.length, 1)
       assert.doesNotMatch(comments[0].body, /fake-secret/)
-      assert.match(comments[0].body, /При частичной публикации/)
+      assert.match(comments[0].body, /Состояние публикации неизвестно/)
     }
   } finally {
     if (previousTemp === undefined) delete process.env.RUNNER_TEMP
@@ -206,12 +206,12 @@ test('schema diagnostic allowlist rejects arbitrary data and retains v1 compatib
     const error = new DiagnosticError('reply_schema')
     error.diagnostic = value
     assert.deepEqual(diagnosticFor(error), { version: 1, code: 'unknown', stage: 'unknown' })
-    assert.match(failureNotice(value, 'run'), /При частичной публикации/)
+    assert.match(failureNotice(value, 'run'), /Состояние публикации неизвестно/)
     assert.doesNotMatch(failureNotice(value, 'run'), /fake-secret/)
   }
 })
 
-test('JSON failure reports bounded v2 metadata and fixed parse categories', () => {
+test('JSON failure reports bounded v4 metadata and fixed parse categories', () => {
   for (const [text, kind, position] of [
     ['{"x":"unfinished', 'unexpected_end', 16],
     ['{} trailing', 'trailing_content', 3],
@@ -223,7 +223,7 @@ test('JSON failure reports bounded v2 metadata and fixed parse categories', () =
     assert.throws(
       () => resultReply(answerStream(text)),
       (error) => {
-        assert.equal(error.diagnostic.version, 2)
+        assert.equal(error.diagnostic.version, 4)
         assert.equal(error.diagnostic.details.parseKind, kind)
         assert.equal(error.diagnostic.details.position, position)
         assert.equal(error.diagnostic.details.candidateChars, text.length)
@@ -258,7 +258,50 @@ test('unsupported fences stay rejected and unknown parser wording stays safe', (
   )
 })
 
-test('v2 is strictly validated before notices and serialization', () => {
+test('synthetic JSON classes report safe categories, candidate coordinates and open structures', () => {
+  for (const [text, category, unclosed] of [
+    ['hello', 'not_json', 'none'],
+    ['prefix {}', 'wrapper', 'none'],
+    ['```typescript\n{}\n```', 'wrapper', 'none'],
+    ['{} tail', 'trailing', 'none'],
+    ['"\\q"', 'escaping', 'none'],
+    ['{"x":}', 'unclassified', 'none'],
+    ['{"x":"```",}', 'syntax', 'none'],
+    ['{"x":[', 'end', 'array'],
+    ['{"x":"brackets [ } \\"', 'end', 'string'],
+    ['{"x":1', 'end', 'object'],
+    ['x'.repeat(12004), 'not_json', 'none'],
+    ['{"x":"' + 'a'.repeat(10008), 'end', 'string'],
+  ]) {
+    assert.throws(
+      () => resultReply(answerStream(text)),
+      (error) => {
+        assert.equal(error.diagnostic.details.category, category)
+        assert.equal(error.diagnostic.details.unclosed, unclosed)
+        assert.equal(diagnosticFor(error).version, 4)
+        assert.ok(Buffer.byteLength(JSON.stringify(diagnosticFor(error))) <= 1024)
+        return true
+      },
+    )
+  }
+  for (const newline of ['\n', '\r\n']) {
+    assert.throws(
+      () =>
+        resultReply(
+          answerStream('```json' + newline + '{' + newline + '"я":"😀"} x' + newline + '```'),
+        ),
+      (error) => {
+        const d = error.diagnostic.details
+        assert.equal(d.line, 2)
+        assert.equal(d.column, 11)
+        assert.equal(d.position, 1 + newline.length + 10)
+        return true
+      },
+    )
+  }
+})
+
+test('v4 is strictly validated before notices and serialization and v2 remains readable', () => {
   let diagnostic
   try {
     resultReply(answerStream('{} trailing'))
@@ -266,12 +309,35 @@ test('v2 is strictly validated before notices and serialization', () => {
     diagnostic = error.diagnostic
   }
   assert.match(failureNotice(diagnostic, 'run'), /Публикация не начиналась/)
+  const v2 = {
+    version: 2,
+    code: 'reply_json',
+    stage: 'reply',
+    details: {
+      streamBytes: 200,
+      eventCount: 2,
+      textEventCount: 1,
+      messageCount: 1,
+      finalTextEventCount: 1,
+      answerBytes: 11,
+      candidateChars: 11,
+      wrapper: 'none',
+      root: 'object',
+      parseKind: 'trailing_content',
+      position: 3,
+    },
+  }
+  const legacyError = new DiagnosticError('reply_json')
+  legacyError.diagnostic = v2
+  assert.deepEqual(diagnosticFor(legacyError), v2)
+  assert.match(failureNotice(v2, 'run'), /offset 3.*строка и столбец не сохранены/)
   const invalid = [
     null,
     [],
     { ...diagnostic, extra: 'fake-secret' },
     { ...diagnostic, stage: 'cli' },
     { ...diagnostic, details: null },
+    { ...diagnostic, details: { ...diagnostic.details, category: ['trailing'] } },
   ]
   for (const field of Object.keys(diagnostic.details)) {
     for (const value of [-1, 0.5, 2_000_001, 'fake-secret', null, [], {}]) {
@@ -282,7 +348,7 @@ test('v2 is strictly validated before notices and serialization', () => {
   invalid.push({ ...diagnostic, details: { ...diagnostic.details, position: 1000 } })
   invalid.push({ ...diagnostic, details: { ...diagnostic.details, extra: 'fake-secret' } })
   for (const value of invalid) {
-    assert.match(failureNotice(value, 'run'), /При частичной публикации/)
+    assert.match(failureNotice(value, 'run'), /Состояние публикации неизвестно/)
     const error = new DiagnosticError('reply_json')
     error.diagnostic = value
     assert.deepEqual(diagnosticFor(error), { version: 1, code: 'unknown', stage: 'unknown' })
@@ -313,6 +379,10 @@ test('counts final message events and distinguishes UTF-8 bytes from UTF-16 offs
         root: 'object',
         parseKind: 'trailing_content',
         position: 11,
+        category: 'trailing',
+        line: 1,
+        column: 12,
+        unclosed: 'none',
       })
       return true
     },
@@ -512,7 +582,7 @@ test('fake CLI covers completed answers, failures and safe artifacts end to end'
         assert.ok(Buffer.byteLength(diagnostic) <= 1024)
         assert.equal(
           JSON.parse(diagnostic).version,
-          code === 'reply_schema' ? 3 : code === 'reply_json' ? 2 : 1,
+          code === 'reply_schema' ? 3 : code === 'reply_json' ? 4 : 1,
         )
         if (code === 'reply_schema') {
           assert.match(failureNotice(JSON.parse(diagnostic), 'run'), /Публикация не начиналась/)
