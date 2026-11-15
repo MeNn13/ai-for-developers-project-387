@@ -255,6 +255,46 @@ export function resultReply(stream) {
       message.match(/ at position (\d+)(?: \(line \d+ column \d+\))?$/)?.[1] ?? NaN,
     )
     const first = candidate.trimStart()[0]
+    const offset =
+      Number.isSafeInteger(position) && position >= 0 && position <= candidate.length
+        ? position
+        : parseKind === 'unexpected_end'
+          ? candidate.length
+          : null
+    const prefix = offset === null ? null : candidate.slice(0, offset).split(/\r\n|\r|\n/)
+    const stack = []
+    let inString = false
+    let escaped = false
+    let outsideString = ''
+    for (const char of candidate) {
+      if (inString) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') inString = false
+      } else {
+        outsideString += char
+        if (char === '"') inString = true
+        else if (char === '{' || char === '[') stack.push(char)
+        else if (char === '}' && stack.at(-1) === '{') stack.pop()
+        else if (char === ']' && stack.at(-1) === '[') stack.pop()
+      }
+    }
+    const category =
+      !fence &&
+      (outsideString.includes('```') ||
+        (!/^[\[{"\d\-tfn]/.test(text) && /[\[{]/.test(outsideString)))
+        ? 'wrapper'
+        : parseKind === 'trailing_content'
+          ? 'trailing'
+          : ['invalid_escape', 'invalid_control'].includes(parseKind)
+            ? 'escaping'
+            : offset === candidate.length || parseKind === 'unexpected_end'
+              ? 'end'
+              : !/^[\[{"\d\-tfn]/.test(candidate)
+                ? 'not_json'
+                : offset !== null
+                  ? 'syntax'
+                  : 'unclassified'
     throw new DiagnosticError('reply_json', {
       ...result.counters,
       answerBytes: Buffer.byteLength(text),
@@ -268,10 +308,17 @@ export function resultReply(stream) {
           : 'none',
       root: first === '{' ? 'object' : first === '[' ? 'array' : first ? 'other' : 'empty',
       parseKind,
-      position:
-        Number.isSafeInteger(position) && position >= 0 && position <= candidate.length
-          ? position
-          : null,
+      position: offset,
+      category,
+      line: prefix === null ? null : prefix.length,
+      column: prefix === null ? null : prefix.at(-1).length + 1,
+      unclosed: inString
+        ? 'string'
+        : stack.at(-1) === '{'
+          ? 'object'
+          : stack.at(-1) === '['
+            ? 'array'
+            : 'none',
     })
   }
   try {

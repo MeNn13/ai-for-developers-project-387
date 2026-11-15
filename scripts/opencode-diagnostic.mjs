@@ -25,6 +25,8 @@ export class DiagnosticError extends Error {
     if (code === 'reply_schema' && details?.reason !== undefined)
       this.diagnostic = { version: 3, code, stage: 'reply', details }
     if (code === 'publication') this.diagnostic = { version: 3, code, stage: 'publish', details }
+    if (code === 'reply_json' && details?.category !== undefined)
+      this.diagnostic = { version: 4, code, stage: 'reply', details }
   }
 }
 
@@ -66,6 +68,38 @@ function validDiagnostic(value) {
       ['none', 'possible', 'unknown'].includes(value.details.state)
     )
   if (value.version === 1) return exactKeys(value, 'version,code,stage')
+  if (value.version === 4) {
+    if (!exactKeys(value, 'version,code,stage,details') || value.code !== 'reply_json') return false
+    const d = value.details
+    if (
+      !exactKeys(
+        d,
+        'streamBytes,eventCount,textEventCount,messageCount,finalTextEventCount,answerBytes,candidateChars,wrapper,root,parseKind,position,category,line,column,unclosed',
+      )
+    )
+      return false
+    const { category, line, column, unclosed, ...legacy } = d
+    return (
+      validDiagnostic({ version: 2, code: 'reply_json', stage: 'reply', details: legacy }) &&
+      typeof category === 'string' &&
+      Object.hasOwn(jsonReasons, category) &&
+      ['none', 'object', 'array', 'string'].includes(unclosed) &&
+      d.candidateChars <= d.answerBytes &&
+      d.answerBytes <= d.streamBytes &&
+      d.finalTextEventCount <= d.textEventCount &&
+      d.textEventCount <= d.eventCount &&
+      d.messageCount <= d.textEventCount &&
+      (d.position === null
+        ? line === null && column === null
+        : bounded(line) &&
+          bounded(column) &&
+          line >= 1 &&
+          column >= 1 &&
+          line + column <= d.position + 2 &&
+          (line !== 1 || column === d.position + 1)) &&
+      Buffer.byteLength(JSON.stringify(value)) <= 1024
+    )
+  }
   if (value.version === 3)
     return (
       exactKeys(value, 'version,code,stage,details') &&
@@ -124,6 +158,16 @@ function validDiagnostic(value) {
   )
 }
 
+const jsonReasons = {
+  not_json: 'Ответ не распознан как JSON.',
+  wrapper: 'Неподдерживаемая Markdown-обёртка или текст вне JSON.',
+  trailing: 'Лишнее содержимое после JSON.',
+  escaping: 'Неверное экранирование или управляющий символ в JSON.',
+  syntax: 'Синтаксическая ошибка внутри документа JSON.',
+  end: 'Ошибка на конце документа JSON; причина завершения ответа неизвестна.',
+  unclassified: 'Неклассифицированная синтаксическая ошибка JSON.',
+}
+
 const schemaFields = {
   version_comment: ['reply', 'version', 'comment'],
   publication_kind: ['publication', 'kind'],
@@ -167,14 +211,23 @@ const publicationReasons = {
   unknown: 'Не удалось завершить публикацию по неизвестной причине.',
 }
 
-export function failureNotice(diagnostic, run, previousPublicationUnknown = false) {
+export function failureNotice(diagnostic, run, publicationState) {
   const notice = buildFailureNotice(diagnostic, run)
-  return previousPublicationUnknown
-    ? notice.replace(
-        'Публикация не начиналась.',
-        'Публикация могла начаться в предыдущем прогоне. При частичной публикации повторите прогон с исходным артефактом; созданные issues сохраняются.',
-      )
-    : notice
+  if (validDiagnostic(diagnostic) && diagnostic.code === 'publication') return notice
+  const state = ['none', 'possible', 'unknown'].includes(publicationState)
+    ? publicationState
+    : 'unknown'
+  const status =
+    state === 'none'
+      ? 'Публикация не начиналась (none).'
+      : state === 'possible'
+        ? 'Публикация могла начаться в предыдущем прогоне (possible). При частичной публикации сохраните созданные issues и восстановите издателя с исходным корректным артефактом.'
+        : 'Состояние публикации неизвестно (unknown). Сначала проверьте созданные issues и комментарии; слепой повтор не рекомендуется.'
+  return notice.replace(
+    'Публикация не начиналась.',
+    status +
+      ' Корректного reply.json нет: результата для восстановления этого ответа нет, повтор только издателя не поможет.',
+  )
 }
 
 function buildFailureNotice(diagnostic, run) {
@@ -182,17 +235,40 @@ function buildFailureNotice(diagnostic, run) {
   if (code === 'publication') {
     const state =
       diagnostic.details.state === 'none'
-        ? 'Публикация не начиналась.'
-        : 'Публикация могла начаться, в том числе в предыдущем прогоне. Повторите прогон с исходным артефактом; созданные issues сохраняются.'
+        ? 'Публикация не начиналась (none). Проверьте причину и исходный корректный артефакт перед восстановлением издателя.'
+        : diagnostic.details.state === 'possible'
+          ? 'Публикация могла начаться (possible). При частичной публикации сохраните созданные issues и восстановите издателя с исходным корректным артефактом.'
+          : 'Состояние публикации неизвестно (unknown). Сначала проверьте созданные issues и комментарии; слепой повтор не рекомендуется.'
     return `${publicationReasons[diagnostic.details.reason]} ${state} [Actions](${run})`
   }
   if (code === 'reply_schema' && diagnostic.version === 3)
     return `${schemaReasons[diagnostic.details.reason]} «${diagnostic.details.field}». Публикация не начиналась. [Actions](${run})`
-  if (code === 'reply_json')
-    return `Не удалось разобрать итоговый ответ модели как JSON. Публикация не начиналась. Код reply_json; безопасные сведения — в артефакте opencode-diagnostic. Передайте ссылку на прогон для диагностики. [Actions](${run})`
+  if (code === 'reply_json') {
+    const details = diagnostic.details
+    const legacy = {
+      unexpected_end: 'end',
+      trailing_content: 'trailing',
+      invalid_escape: 'escaping',
+      invalid_control: 'escaping',
+    }
+    const reason =
+      diagnostic.version === 4
+        ? jsonReasons[details.category]
+        : (jsonReasons[legacy[details?.parseKind]] ??
+          'Не удалось разобрать итоговый ответ модели как JSON.')
+    const location =
+      details?.position != null
+        ? `Позиция в JSON-кандидате: offset ${details.position} (0-based UTF-16)${diagnostic.version === 4 ? `, строка ${details.line}, столбец ${details.column} (1-based)` : '; строка и столбец не сохранены'}.`
+        : 'Точная позиция не определена.'
+    const structure =
+      diagnostic.version === 4 && details.unclosed !== 'none'
+        ? `Незакрытая структура: ${{ object: 'объект', array: 'массив', string: 'строка' }[details.unclosed]}.`
+        : ''
+    return `Стадия: подготовка ответа (reply_json). ${reason} ${location} ${structure} Публикация не начиналась. Безопасные сведения — в артефакте opencode-diagnostic. Передайте ссылку на прогон для диагностики. [Actions](${run})`
+  }
   if (code === 'reply_schema')
     return `Итоговый ответ модели не соответствует схеме публикации. Публикация не начиналась. Код reply_schema; безопасные сведения — в артефакте opencode-diagnostic. Передайте ссылку на прогон для диагностики. [Actions](${run})`
   if (code !== 'unknown')
     return `${categories[code][1]} Публикация не начиналась. [Actions](${run})`
-  return `${categories[code][1]} При частичной публикации повторите прогон с исходным артефактом; созданные issues сохраняются. [Actions](${run})`
+  return `${categories[code][1]} Публикация не начиналась. [Actions](${run})`
 }

@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { publish } from './opencode-publish.mjs'
+import { publish, preparationPublicationState } from './opencode-publish.mjs'
 import { diagnosticFor, failureNotice } from './opencode-diagnostic.mjs'
 import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
+
+test('publication discovery rejects untrusted context before reading GitHub', async () => {
+  for (const source of [null, {}, { ...context, number: 0 }, { ...context, comments: [] }]) {
+    assert.equal(
+      await preparationPublicationState(source, () => assert.fail('untrusted read')),
+      'unknown',
+    )
+  }
+})
 
 test('publication diagnostic parsing rejects unknown data and bounds safe output', () => {
   const diagnostic = {
@@ -23,7 +32,7 @@ test('publication diagnostic parsing rejects unknown data and bounds safe output
     { ...diagnostic, details: { ...diagnostic.details, reason: ['github_write'] } },
     { ...diagnostic, details: { ...diagnostic.details, state: 'fake-secret' } },
   ]) {
-    assert.match(failureNotice(bad, 'run'), /При частичной публикации/)
+    assert.match(failureNotice(bad, 'run'), /Состояние публикации неизвестно \(unknown\)/)
     assert.doesNotMatch(failureNotice(bad, 'run'), /fake-secret|Публикация не начиналась/)
   }
 })
@@ -53,7 +62,12 @@ test('remaining publication preflight failures expose fixed reasons without writ
           stage: 'publish',
           details: { reason, state: reason === 'duplicate_markers' ? 'possible' : 'unknown' },
         })
-        assert.match(failureNotice(diagnostic, 'run'), /могла начаться/)
+        assert.match(
+          failureNotice(diagnostic, 'run'),
+          reason === 'duplicate_markers'
+            ? /могла начаться \(possible\)/
+            : /Состояние публикации неизвестно \(unknown\)/,
+        )
         assert.doesNotMatch(JSON.stringify(error) + failureNotice(diagnostic, 'run'), /fake-secret/)
         return true
       },
@@ -95,7 +109,12 @@ test('recovery preflight never hides previous publication when new writes are bl
     await assert.rejects(publish(input, source, api, 'run'), (error) => {
       const diagnostic = diagnosticFor(error)
       assert.deepEqual(diagnostic.details, { reason, state })
-      assert.match(failureNotice(diagnostic, 'run'), /могла начаться/)
+      assert.match(
+        failureNotice(diagnostic, 'run'),
+        state === 'possible'
+          ? /могла начаться \(possible\)/
+          : /Состояние публикации неизвестно \(unknown\)/,
+      )
       assert.doesNotMatch(failureNotice(diagnostic, 'run'), /Публикация не начиналась|fake-secret/)
       return true
     })
@@ -167,9 +186,120 @@ test('workflow reports publication failures safely and keeps the run failed', as
       assert.equal(failures.length, 1)
       assert.equal(comments.length, 1)
       assert.match(comments[0].body, explanation)
-      assert.match(comments[0].body, /могла начаться/)
+      assert.match(comments[0].body, /могла начаться|Состояние публикации неизвестно/)
       assert.doesNotMatch(JSON.stringify(comments) + JSON.stringify(failures), /fake-secret/)
       assert.equal(fixture.issues.length, issueCount)
+    }
+  } finally {
+    if (before.temp === undefined) delete process.env.RUNNER_TEMP
+    else process.env.RUNNER_TEMP = before.temp
+    if (before.result === undefined) delete process.env.ANSWER_RESULT
+    else process.env.ANSWER_RESULT = before.result
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('failed preparation discovers publication markers with complete bounded history', async () => {
+  const workflow = await readFile('.github/workflows/opencode.yml', 'utf8')
+  const source = workflow
+    .split('          script: |\n')[1]
+    .split('\n  publish-triage:')[0]
+    .split('\n')
+    .map((line) => line.slice(12))
+    .join('\n')
+  const directory = await mkdtemp(join(tmpdir(), 'opencode-preparation-history-'))
+  const before = { temp: process.env.RUNNER_TEMP, result: process.env.ANSWER_RESULT }
+  try {
+    process.env.RUNNER_TEMP = directory
+    process.env.ANSWER_RESULT = 'failure'
+    await mkdir(join(directory, 'opencode-context'))
+    await mkdir(join(directory, 'opencode-diagnostic'))
+    for (const diagnostic of [
+      JSON.stringify({ version: 1, code: 'reply_json', stage: 'reply' }),
+      null,
+      'fake-secret',
+      'x'.repeat(1025),
+      JSON.stringify({ version: 1, code: 'unknown', stage: 'unknown' }),
+    ]) {
+      const file = join(directory, 'opencode-diagnostic/diagnostic.json')
+      if (diagnostic === null) await rm(file, { force: true })
+      else await writeFile(file, diagnostic)
+      for (const scenario of [
+        'empty',
+        'prior',
+        'later',
+        'lost',
+        'unavailable',
+        'incomplete',
+        'untrusted',
+        'notice',
+        'other-operation',
+        'human-marker',
+      ]) {
+        await writeFile(
+          join(directory, 'opencode-context/context.json'),
+          JSON.stringify(scenario === 'untrusted' ? { ...context, requestId: 999 } : context),
+        )
+        const comments = []
+        let reads = 0
+        const execute = new (Object.getPrototypeOf(async function () {}).constructor)(
+          'require',
+          'context',
+          'github',
+          'core',
+          source,
+        )
+        await execute(
+          createRequire(import.meta.url),
+          {
+            repo: { owner: 'MeNn13', repo: 'ai-for-developers-project-387' },
+            runId: 1,
+            eventName: 'issue_comment',
+            payload: { issue: { number: 9 }, comment: { id: 40 } },
+          },
+          {
+            request: async (route) => {
+              assert.ok(route.startsWith('GET '), 'discovery is read only')
+              reads++
+              if (scenario === 'unavailable') throw new Error('fake-secret')
+              if (scenario === 'incomplete')
+                return { data: Array.from({ length: 100 }, () => ({ number: 1 })) }
+              const item = {
+                user: { login: 'github-actions[bot]', type: 'Bot' },
+                body: '<!-- opencode:9:40:spec -->',
+              }
+              if (scenario === 'later' && route.includes('/issues?'))
+                return {
+                  data: route.endsWith('page=1')
+                    ? Array.from({ length: 100 }, () => ({ number: 1 }))
+                    : [item],
+                }
+              if (scenario === 'prior' && route.includes('/issues?')) return { data: [item] }
+              if (scenario === 'other-operation' && route.includes('/issues?'))
+                return { data: [{ ...item, body: '<!-- opencode:9:400:spec -->' }] }
+              if (scenario === 'human-marker' && route.includes('/issues?'))
+                return { data: [{ ...item, user: { login: 'MeNn13', type: 'User' } }] }
+              if (scenario === 'lost' && route.includes('/comments?'))
+                return { data: [{ ...item, body: '<!-- opencode:9:40:reply:0 -->' }] }
+              if (scenario === 'notice' && route.includes('/comments?'))
+                return { data: [{ ...item, body: 'Диагностика отказа. Actions' }] }
+              return { data: [] }
+            },
+            rest: { issues: { createComment: async (comment) => comments.push(comment) } },
+          },
+          { setFailed: () => {} },
+        )
+        assert.equal(comments.length, 1)
+        const expected = ['empty', 'notice', 'other-operation', 'human-marker'].includes(scenario)
+          ? /Публикация не начиналась/
+          : ['prior', 'later', 'lost'].includes(scenario)
+            ? /могла начаться.*\(possible\)/
+            : /Состояние публикации неизвестно \(unknown\)/
+        assert.match(comments[0].body, expected)
+        assert.doesNotMatch(comments[0].body, /fake-secret/)
+        assert.ok(reads <= 200)
+        if (scenario === 'untrusted') assert.equal(reads, 0)
+      }
     }
   } finally {
     if (before.temp === undefined) delete process.env.RUNNER_TEMP

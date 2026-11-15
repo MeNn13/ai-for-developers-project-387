@@ -36,6 +36,30 @@ async function list(api, path) {
   throw new DiagnosticError('publication', { reason: 'pagination', state: 'unknown' })
 }
 
+/** Read-only recovery discovery when preparation produced no valid reply artifact. */
+export async function preparationPublicationState(context, api) {
+  if (
+    !positive(context?.number) ||
+    !positive(context?.requestId) ||
+    context.mode === 'triage' ||
+    !Array.isArray(context.comments) ||
+    !trustedHuman(context.comments.find((comment) => comment.id === context.requestId) ?? {})
+  )
+    return 'unknown'
+  const marker = `<!-- opencode:${context.number}:${context.requestId}:`
+  try {
+    const issues = await list(api, '/issues?state=all')
+    const comments = await list(api, `/issues/${context.number}/comments`)
+    return [...issues, ...comments].some(
+      (item) => bot(item) && typeof item.body === 'string' && item.body.includes(marker),
+    )
+      ? 'possible'
+      : 'none'
+  } catch {
+    return 'unknown'
+  }
+}
+
 function stamped(body, runUrl) {
   // Keep a skill's required leading disclaimer at the start of its text.
   return `${body}\n\nOpenCode · [Actions](${runUrl})`
