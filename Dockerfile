@@ -32,7 +32,7 @@ RUN dotnet restore backend/BookingCalendar.sln --locked-mode \
        --configuration Release --output /out --no-restore
 
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:11.0 AS final
 
 WORKDIR /app
 
