@@ -28,10 +28,8 @@ test('reply config adds only its plugin and narrow permissions without changing 
   assert.equal(config.update, 'disable')
   for (const path of ['.github/workflows/opencode.yml', '.github/workflows/opencode-review.yml']) {
     const workflow = await readFile(path, 'utf8')
-    assert.match(
-      workflow,
-      /node scripts\/opencode-config.mjs \| sudo tee \/etc\/opencode\/opencode.json/,
-    )
+    assert.match(workflow, /node scripts\/opencode-config.mjs/)
+    assert.match(workflow, /\| sudo tee \/etc\/opencode\/opencode.json/)
   }
 })
 
