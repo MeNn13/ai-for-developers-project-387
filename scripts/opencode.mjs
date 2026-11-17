@@ -1,5 +1,6 @@
 import { validateReply, ReplyValidationError, protocolInstruction } from './opencode-protocol.mjs'
-import { appendFile, readFile, writeFile, mkdir } from 'node:fs/promises'
+import { appendFile, readFile, writeFile, mkdir, rm } from 'node:fs/promises'
+import { isDeepStrictEqual } from 'node:util'
 import { spawn } from 'node:child_process'
 import { resolve, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -173,11 +174,7 @@ export async function github(path, accept = 'application/vnd.github+json') {
   return accept === 'application/vnd.github.diff' ? response.text() : response.json()
 }
 
-function resultText(stream) {
-  let eventCount = 0
-  let textEventCount = 0
-  let finalTextEventCount = 0
-  const messages = new Set()
+function resultText(stream, { requireText = true, onEvent = () => {} } = {}) {
   let message
   let text = ''
   let finished = false
@@ -195,7 +192,6 @@ function resultText(stream) {
     } catch {
       throw new DiagnosticError('stream_json')
     }
-    eventCount++
     if (event.type === 'error')
       throw new DiagnosticError(
         [401, 403].includes(event.error?.data?.statusCode)
@@ -204,123 +200,61 @@ function resultText(stream) {
             ? 'provider_rate'
             : 'provider_error',
       )
+    onEvent(event)
+    if (event.type === 'step_start') finished = false
     if (event.type === 'text') {
-      textEventCount++
-      messages.add(event.part.messageID)
       if (event.part.messageID !== message) {
         message = event.part.messageID
         text = ''
-        finalTextEventCount = 0
       }
       text += event.part.text
-      finalTextEventCount++
       finished = false
     }
     if (event.type === 'step_finish') finished = event.part.reason === 'stop'
   }
-  if (!finished || !text.trim()) throw new DiagnosticError('incomplete')
-  return {
-    text,
-    counters: {
-      streamBytes: Buffer.byteLength(stream),
-      eventCount,
-      textEventCount,
-      messageCount: messages.size,
-      finalTextEventCount,
-    },
-  }
+  if (!finished || (requireText && !text.trim())) throw new DiagnosticError('incomplete')
+  return text
 }
 
 export function resultReply(stream) {
-  const result = resultText(stream)
-  const text = result.text.trim()
-  const fence = text.match(/^```(?:json)?\r?\n([\s\S]*?)\r?\n```$/)
-  const candidate = fence ? fence[1] : text
   let reply
-  try {
-    reply = JSON.parse(candidate)
-  } catch (error) {
-    const message = error.message
-    const parseKind =
-      /^(?:Unexpected end of JSON input|Unterminated string in JSON at position \d+)/.test(message)
-        ? 'unexpected_end'
-        : /^Unexpected non-whitespace character after JSON at position \d+/.test(message)
-          ? 'trailing_content'
-          : /^Bad (?:escaped character|Unicode escape) in JSON at position \d+/.test(message)
-            ? 'invalid_escape'
-            : /^Bad control character in string literal in JSON at position \d+/.test(message)
-              ? 'invalid_control'
-              : 'syntax_other'
-    const position = Number(
-      message.match(/ at position (\d+)(?: \(line \d+ column \d+\))?$/)?.[1] ?? NaN,
-    )
-    const first = candidate.trimStart()[0]
-    const offset =
-      Number.isSafeInteger(position) && position >= 0 && position <= candidate.length
-        ? position
-        : parseKind === 'unexpected_end'
-          ? candidate.length
-          : null
-    const prefix = offset === null ? null : candidate.slice(0, offset).split(/\r\n|\r|\n/)
-    const stack = []
-    let inString = false
-    let escaped = false
-    let outsideString = ''
-    for (const char of candidate) {
-      if (inString) {
-        if (escaped) escaped = false
-        else if (char === '\\') escaped = true
-        else if (char === '"') inString = false
-      } else {
-        outsideString += char
-        if (char === '"') inString = true
-        else if (char === '{' || char === '[') stack.push(char)
-        else if (char === '}' && stack.at(-1) === '{') stack.pop()
-        else if (char === ']' && stack.at(-1) === '[') stack.pop()
+  let sessionID
+  const calls = new Map()
+  resultText(stream, {
+    requireText: false,
+    onEvent(event) {
+      if (event.sessionID) {
+        if (sessionID && sessionID !== event.sessionID) throw new DiagnosticError('stream_json')
+        sessionID = event.sessionID
       }
-    }
-    const category =
-      !fence &&
-      (outsideString.includes('```') ||
-        (!/^[\[{"\d\-tfn]/.test(text) && /[\[{]/.test(outsideString)))
-        ? 'wrapper'
-        : parseKind === 'trailing_content'
-          ? 'trailing'
-          : ['invalid_escape', 'invalid_control'].includes(parseKind)
-            ? 'escaping'
-            : offset === candidate.length || parseKind === 'unexpected_end'
-              ? 'end'
-              : !/^[\[{"\d\-tfn]/.test(candidate)
-                ? 'not_json'
-                : offset !== null
-                  ? 'syntax'
-                  : 'unclassified'
-    throw new DiagnosticError('reply_json', {
-      ...result.counters,
-      answerBytes: Buffer.byteLength(text),
-      candidateChars: candidate.length,
-      wrapper: fence
-        ? text.startsWith('```json')
-          ? 'json_fence'
-          : 'bare_fence'
-        : text.startsWith('```')
-          ? 'other_fence'
-          : 'none',
-      root: first === '{' ? 'object' : first === '[' ? 'array' : first ? 'other' : 'empty',
-      parseKind,
-      position: offset,
-      category,
-      line: prefix === null ? null : prefix.length,
-      column: prefix === null ? null : prefix.at(-1).length + 1,
-      unclosed: inString
-        ? 'string'
-        : stack.at(-1) === '{'
-          ? 'object'
-          : stack.at(-1) === '['
-            ? 'array'
-            : 'none',
-    })
-  }
+      if (
+        event.type !== 'tool_use' ||
+        event.part?.tool !== 'submit_reply' ||
+        event.part.state?.status !== 'completed'
+      )
+        return
+      const { part } = event
+      if (
+        ![event.sessionID, part.messageID, part.id].every(
+          (id) => typeof id === 'string' && id.length,
+        )
+      )
+        throw new DiagnosticError('stream_json')
+      validateSubmittedReply(part.state.input)
+      const key = JSON.stringify([event.sessionID, part.messageID, part.id])
+      if (calls.has(key) && !isDeepStrictEqual(calls.get(key), part.state.input))
+        throw new DiagnosticError('submission_conflict')
+      calls.set(key, part.state.input)
+      if (reply && !isDeepStrictEqual(reply, part.state.input))
+        throw new DiagnosticError('submission_conflict')
+      reply ??= part.state.input
+    },
+  })
+  if (!reply) throw new DiagnosticError('submission_missing')
+  return reply
+}
+
+function validateSubmittedReply(reply) {
   try {
     validateReply(reply)
   } catch (error) {
@@ -330,10 +264,10 @@ export function resultReply(stream) {
         : { rule: 'schema_other' }),
     })
   }
-  return reply
 }
 
 export async function run(directory, options = {}) {
+  await rm(join(directory, 'reply.json'), { force: true })
   if (!process.env.OPENCODE_API_KEY) throw new DiagnosticError('configuration')
   let context, prompt, automatic
   try {
@@ -384,7 +318,7 @@ export async function run(directory, options = {}) {
   if (status !== 0) throw new DiagnosticError('cli_exit')
   let reply
   if (automatic) {
-    const comment = resultText(stream).text.trim()
+    const comment = resultText(stream).trim()
     if (comment.length > 50_000) throw new DiagnosticError('stream_limit')
     reply = { version: 1, comment, publication: null }
   } else {

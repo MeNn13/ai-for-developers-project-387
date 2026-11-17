@@ -1,0 +1,6 @@
+{
+  "name": "@booking-calendar/opencode-submit-reply",
+  "private": true,
+  "type": "module",
+  "exports": "./index.mjs"
+}

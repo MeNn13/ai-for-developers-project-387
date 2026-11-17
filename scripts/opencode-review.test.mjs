@@ -31,7 +31,7 @@ test('review starts a fresh CLI session with independent instructions and no pub
         if (!input.includes('independent PR review') || !input.includes('publication strictly null') ||
             !process.argv.includes('--standalone') || process.argv.includes('--continue') ||
             process.env.GH_TOKEN) process.exit(3);
-        console.log(JSON.stringify({ type: 'text', part: { text: JSON.stringify({ version: 1, comment: 'No confirmed defects', publication: null }), messageID: 'r' } }));
+        console.log(JSON.stringify({ type: 'tool_use', sessionID: 'review', part: { id: 'reply', tool: 'submit_reply', state: { status: 'completed', input: { version: 1, comment: 'No confirmed defects', publication: null } }, messageID: 'r' } }));
         console.log(JSON.stringify({ type: 'step_finish', part: { reason: 'stop' } }));
         process.exit(0);
       }
