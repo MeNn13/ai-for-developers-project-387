@@ -7,6 +7,58 @@ import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { eligible, prepareReview, publishReview } from './opencode-review.mjs'
 
+test('workflow preserves a safe failed-review diagnostic without executing PR code', async () => {
+  const workflow = await readFile('.github/workflows/opencode-review.yml', 'utf8')
+  const match = workflow.match(
+    /node --input-type=module <<'NODE'\r?\n([\s\S]*?)\r?\n          NODE/,
+  )
+  assert.ok(match, 'review run must preserve the trusted runner diagnostic')
+  const source = match[1]
+    .split(/\r?\n/)
+    .map((line) => line.slice(10))
+    .join('\n')
+  const directory = await mkdtemp(join(tmpdir(), 'review-diagnostic-'))
+  try {
+    await writeFile(join(directory, 'context.json'), JSON.stringify({ mode: 'review' }))
+    const loader = join(directory, 'loader.mjs')
+    await writeFile(
+      loader,
+      `
+      if (process.argv[1]?.endsWith('run')) {
+        for await (const part of process.stdin) { void part; }
+        process.stderr.write('private-provider-context');
+        await new Promise(() => process.stdout.write(JSON.stringify({ type: 'error', error: { data: { statusCode: 429 }, message: 'private-provider-context' } }), () => process.exit(0)));
+      }
+    `,
+    )
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_OPTIONS: `--import=${pathToFileURL(loader).href}`,
+        OPENCODE_BIN: process.execPath,
+        OPENCODE_IO: directory,
+        OPENCODE_API_KEY: 'private-provider-context',
+      },
+    })
+    assert.equal(result.status, 1)
+    assert.doesNotMatch(result.stdout + result.stderr, /private-provider-context/)
+    assert.deepEqual(JSON.parse(await readFile(join(directory, 'diagnostic.json'), 'utf8')), {
+      version: 1,
+      code: 'provider_rate',
+      stage: 'provider',
+    })
+    await assert.rejects(readFile(join(directory, 'reply.json')), { code: 'ENOENT' })
+    assert.match(
+      workflow,
+      /if: always\(\) && !cancelled\(\) && steps.context.outputs.allowed == 'true'/,
+    )
+    assert.match(workflow, /ref: \$\{\{ github.event.pull_request.base.sha \}\}/)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('review config installation supports old trusted bases without hiding helper failures', async () => {
   const workflow = await readFile('.github/workflows/opencode-review.yml', 'utf8')
   const match = workflow.match(

@@ -58,8 +58,7 @@ async function invoke(events, { status = 0, stale = false, mode, rawStream } = {
       if (process.argv[1]?.endsWith('run')) {
         process.stdin.resume();
         await new Promise(() => process.stdin.on('end', () => {
-          process.stdout.write(readFileSync(new URL('./stream.jsonl', import.meta.url)));
-          process.exit(${status});
+          process.stdout.write(readFileSync(new URL('./stream.jsonl', import.meta.url)), () => process.exit(${status}));
         }));
       }
     `,

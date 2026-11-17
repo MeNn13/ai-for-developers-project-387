@@ -62,12 +62,33 @@ jobs:
           fi | sudo tee /etc/opencode/opencode.json > /dev/null
       - name: Run independent review
         if: steps.context.outputs.allowed == 'true'
-        run: node scripts/opencode-review.mjs run
+        run: |
+          node --input-type=module <<'NODE'
+          import { writeFile } from 'node:fs/promises';
+          import { join } from 'node:path';
+          import { run } from './scripts/opencode.mjs';
+          import { diagnosticFor } from './scripts/opencode-diagnostic.mjs';
+          try {
+            await run(process.env.OPENCODE_IO, {
+              prompt: '.github/opencode/review-prompt.txt',
+              title: 'Independent PR review',
+            });
+          } catch (error) {
+            const diagnostic = diagnosticFor(error);
+            console.error(JSON.stringify(diagnostic));
+            try {
+              await writeFile(join(process.env.OPENCODE_IO, 'diagnostic.json'), JSON.stringify(diagnostic));
+            } catch {
+              console.error('Could not save safe review diagnostic.');
+            }
+            process.exitCode = 1;
+          }
+          NODE
         env:
           OPENCODE_IO: ${{ runner.temp }}/review
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: steps.context.outputs.allowed == 'true'
+        if: always() && !cancelled() && steps.context.outputs.allowed == 'true'
         with:
           name: independent-review
           path: ${{ runner.temp }}/review/*.json
