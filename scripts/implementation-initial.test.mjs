@@ -257,7 +257,10 @@ test('expired initial deadline reports timeout before any model or candidate com
   )
   assert.equal(child.status, 1)
   assert.match(child.stderr, /initial_timeout/)
-  assert.equal(readFileSync(output, 'utf8'), 'reason=timeout\n')
+  assert.equal(
+    readFileSync(output, 'utf8'),
+    'reason=timeout\ndiagnostic=initial_timeout phase=first ticket=none operation=preflight category=timeout\n',
+  )
 })
 
 test('CLI integrates real Git ticket commits in dependency order and emits draft then checked ready data', (t) => {
@@ -300,7 +303,9 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
     preload,
     `import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const spawn=cp.spawnSync;cp.spawnSync=(bin,args,opts)=>args?.some(a=>a.endsWith?.('implementation-sandbox.mjs'))?{status:0}:(bin==='opencode'||(bin==='timeout'&&args.includes('opencode')))?spawn(process.execPath,[${JSON.stringify(fake)}],opts):spawn(bin,args,opts);syncBuiltinESMExports();`,
   )
-  const execute = (phase) => {
+  const execute = (phase, failure) => {
+    const output = join(io, 'output')
+    writeFileSync(output, '')
     context.phase = phase === 'first' ? 'first' : 'final'
     writeFileSync(join(io, 'context.json'), JSON.stringify(context))
     const result = spawnSync(
@@ -311,6 +316,7 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
         env: {
           ...process.env,
           NODE_OPTIONS: '--import ' + pathToFileURL(preload).href,
+          GITHUB_OUTPUT: output,
           GITHUB_RUN_ATTEMPT: '1',
           INITIAL_IO: io,
           INITIAL_CANDIDATE_ROOT: candidate,
@@ -320,13 +326,52 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
         },
       },
     )
+    if (failure) {
+      assert.equal(result.status, 1)
+      assert.doesNotMatch(result.stdout + result.stderr, /SECRET_MARKER/)
+      assert.ok(result.stderr.includes(failure), result.stderr)
+      assert.equal(
+        readFileSync(output, 'utf8'),
+        `reason=unknown\ndiagnostic=initial_graph_failed ${failure}\n`,
+      )
+      return
+    }
     assert.equal(result.status, 0, result.stderr)
+    assert.equal(readFileSync(output, 'utf8'), '')
+    assert.doesNotMatch(result.stderr, /graph_failed/)
     return JSON.parse(readFileSync(join(io, 'result.json')))
   }
+  const successModel = readFileSync(fake)
+  writeFileSync(
+    fake,
+    `console.error('SECRET_MARKER'); console.log(JSON.stringify({type:'error',error:{name:'APIError',data:{message:'SECRET_MARKER',statusCode:429}}})); process.exitCode=1`,
+  )
+  execute('first', 'phase=first ticket=3 operation=model category=provider_error status=429')
+  writeFileSync(fake, successModel)
   const first = execute('first')
   assert.equal(first.ready, false)
   assert.equal(git('rev-parse', first.candidateSha + '^'), base)
   context.expectedHead = first.candidateSha
+  for (const [script, diagnostic] of [
+    [
+      "console.error('SECRET_MARKER'); process.exitCode=7",
+      'operation=model category=model_exit status=7',
+    ],
+    ["console.log('{}')", 'operation=model category=incomplete_stream'],
+    ["console.log('SECRET_MARKER')", 'operation=model category=decode_failed'],
+    [
+      `console.log(JSON.stringify({type:'error',error:{name:'SECRET_MARKER'}}))`,
+      'operation=model category=unknown',
+    ],
+    [
+      `console.log(JSON.stringify({type:'text',part:{text:'{}'}})); console.log(JSON.stringify({type:'step_finish',part:{reason:'stop'}}))`,
+      'operation=validate category=invalid_result',
+    ],
+  ]) {
+    writeFileSync(fake, script)
+    execute('final', 'phase=final ticket=4 ' + diagnostic)
+  }
+  writeFileSync(fake, successModel)
   const final = execute('final')
   assert.equal(final.ready, true)
   assert.equal(git('rev-parse', final.candidateSha + '^'), first.candidateSha)

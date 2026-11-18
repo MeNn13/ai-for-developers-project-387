@@ -6,6 +6,15 @@ import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { validateRepair } from './implementation-repair.mjs'
 
+const phase = ['first', 'final'].includes(process.argv[2]) ? process.argv[2] : 'unknown'
+let activeTicket = 'none'
+let operation = 'preflight'
+class GraphFailure extends Error {
+  constructor(category, status) {
+    super(category)
+    this.status = status
+  }
+}
 const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
 const requireValue = (ok) => {
   if (!ok) throw new Error('initial_graph_failed')
@@ -15,7 +24,7 @@ const root = process.env.INITIAL_CANDIDATE_ROOT
 const directory = process.env.INITIAL_IO
 const read = async (name) => JSON.parse(await readFile(`${directory}/${name}.json`, 'utf8'))
 const write = (name, value) => writeFile(`${directory}/${name}.json`, JSON.stringify(value))
-function command(bin, args, options = {}) {
+function command(bin, args, options = {}, modelCall = false) {
   const timeout = options.timeout
   // GNU timeout controls the process group, including model/check descendants.
   const bounded = process.platform === 'linux' && Number.isFinite(timeout)
@@ -39,31 +48,33 @@ function command(bin, args, options = {}) {
     },
   )
   if ((bounded && [124, 137].includes(child.status)) || child.error?.code === 'ETIMEDOUT')
-    throw new Error('initial_timeout')
+    throw new GraphFailure('timeout')
+  if (modelCall) return decodeModel(child, bounded)
   requireValue(child.status === 0)
   return child.stdout?.trim()
 }
 const git = (args, options) => command('git', args, options)
 function remaining(context) {
   const ms = context.deadline - Date.now()
-  if (ms <= 0) throw new Error('initial_timeout')
+  if (ms <= 0) throw new GraphFailure('timeout')
   return ms
 }
 function clean() {
   requireValue(git(['status', '--porcelain', '--untracked-files=no']) === '')
 }
 function checked(context) {
+  operation = 'check'
   command(process.execPath, [resolve(trustedRoot, 'scripts/implementation-sandbox.mjs')], {
-    stdio: 'inherit',
+    stdio: 'ignore',
     timeout: remaining(context),
     env: { ...process.env, REPAIR_CANDIDATE_ROOT: root, OPENCODE_API_KEY: '', GH_TOKEN: '' },
   })
   clean()
 }
 function model(context, instruction) {
-  requireValue(Boolean(process.env.OPENCODE_API_KEY))
+  if (!process.env.OPENCODE_API_KEY) throw new GraphFailure('model_launch')
   // Every ticket/review is a fresh CLI session, with read-only repository tools.
-  const stream = command(
+  return command(
     process.env.OPENCODE_BIN ?? 'opencode',
     ['run', '--standalone', '--format', 'json', '--agent', 'discussion', '--model', config.model],
     {
@@ -73,25 +84,68 @@ function model(context, instruction) {
         Object.entries(process.env).filter(([key]) => !/TOKEN|PRIVATE_KEY/.test(key)),
       ),
     },
+    true,
   )
+}
+function decodeModel(child, bounded) {
+  if (child.error?.code === 'ENOBUFS') throw new GraphFailure('decode_failed')
+  if (child.error || (bounded && [126, 127].includes(child.status)))
+    throw new GraphFailure('model_launch')
   let text = '',
     finished = false
-  for (const line of stream.split(/\r?\n/).filter(Boolean)) {
-    const item = JSON.parse(line)
-    if (item.type === 'text') text += item.part.text
-    if (item.type === 'step_finish' && item.part.reason === 'stop') finished = true
+  let malformed = false
+  let unknownError = false
+  for (const line of (child.stdout ?? '').split(/\r?\n/).filter(Boolean)) {
+    try {
+      const item = JSON.parse(line)
+      if (item.type === 'error') {
+        if (['APIError', 'ProviderAuthError'].includes(item.error?.name)) {
+          const status = item.error.data?.statusCode
+          throw new GraphFailure(
+            'provider_error',
+            Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined,
+          )
+        }
+        unknownError = true
+      }
+      if (item.type === 'text') {
+        if (typeof item.part?.text === 'string') text += item.part.text
+        else malformed = true
+      }
+      if (item.type === 'step_finish' && item.part.reason === 'stop') finished = true
+    } catch (error) {
+      if (error instanceof GraphFailure) throw error
+      malformed = true
+    }
   }
-  requireValue(finished)
-  return JSON.parse(text)
+  if (unknownError) throw new GraphFailure('unknown')
+  if (child.status !== 0)
+    throw new GraphFailure(
+      'model_exit',
+      Number.isInteger(child.status) && child.status >= 0 && child.status <= 255
+        ? child.status
+        : undefined,
+    )
+  if (malformed) throw new GraphFailure('decode_failed')
+  if (!finished) throw new GraphFailure('incomplete_stream')
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new GraphFailure('decode_failed')
+  }
 }
 async function integrate(context, reply, label) {
+  operation = 'apply'
   const base = git(['rev-parse', 'HEAD'])
   clean()
   const stepContext = { ...context, expectedHead: base }
   const step = `${directory}/step`
   await mkdir(step, { recursive: true })
   await writeFile(`${step}/context.json`, JSON.stringify(stepContext))
-  await writeFile(`${step}/reply.json`, JSON.stringify(validateRepair(reply, stepContext)))
+  operation = 'validate'
+  const validated = validateRepair(reply, stepContext)
+  operation = 'apply'
+  await writeFile(`${step}/reply.json`, JSON.stringify(validated))
   command(
     process.execPath,
     [resolve(trustedRoot, 'scripts/implementation-repair.mjs'), 'candidate'],
@@ -136,7 +190,8 @@ async function runGraph(context, completed, execute, first = false) {
 }
 async function main() {
   const context = await read('context')
-  const first = process.argv[2] === 'first'
+  requireValue(phase !== 'unknown')
+  const first = phase === 'first'
   requireValue(!process.env.GITHUB_RUN_ATTEMPT || process.env.GITHUB_RUN_ATTEMPT === '1')
   requireValue(context.phase === (first ? 'first' : 'final'))
   remaining(context)
@@ -148,11 +203,17 @@ async function main() {
     context,
     completed,
     async (ticket, history) => {
+      activeTicket =
+        Number.isSafeInteger(ticket.number) && ticket.number > 0 ? ticket.number : 'none'
+      operation = 'model'
       const reply = model(
         { ...context, activeTicket: ticket, integrations: history },
         'Apply implement-spec and tdd at approved seams. Implement ONLY activeTicket. Read AGENTS and applicable docs. Shell, writes, network and delegated tools are prohibited. Return JSON {version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}. English Conventional Commit references active ticket. Never emit generated files. Explain risk by consequences and data rollback sufficiency. No repeated attempts.',
       )
-      return integrate(context, reply, `ticket-${ticket.number}`)
+      const record = await integrate(context, reply, `ticket-${ticket.number}`)
+      activeTicket = 'none'
+      operation = 'graph'
+      return record
     },
     first,
   )
@@ -161,6 +222,7 @@ async function main() {
     for (const axis of ['Standards', 'Spec']) {
       // The read-only CLI cannot run Git. Supply the actual base-to-head change
       // as data, refreshing it after any repair by the preceding review session.
+      operation = axis === 'Standards' ? 'review_standards' : 'review_spec'
       const reviewContext = {
         base: context.base,
         head: git(['rev-parse', 'HEAD']),
@@ -178,7 +240,8 @@ async function main() {
         { ...context, integrations: records, review: reviewContext },
         `Perform independent ${axis} review of entire integrated graph against base ${context.base}. Read changes and approved context. Return JSON {findings:[{path,line,conditions,consequences}],risk,rollback,repair:null|{version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}}. Summarize consequences and risk of ENTIRE change; explain whether reverting code suffices for data. Provide only confirmed defects. No writes or shell. Review is separate from external GitHub author review.`,
       )
-      requireValue(Array.isArray(review.findings))
+      operation = 'validate'
+      requireValue(Array.isArray(review?.findings))
       requireValue(
         typeof review.risk === 'string' &&
           review.risk.length > 0 &&
@@ -190,10 +253,12 @@ async function main() {
         requireValue(review.repair)
         records.push(await integrate(context, review.repair, `review-${axis}`))
       }
+      operation = 'record'
       await write(`review-${axis}`, review)
     }
   }
   // Preserve the per-ticket commits locally; publish one deterministic phase commit.
+  operation = 'assemble'
   const files = []
   for (const path of git(['diff', '--no-renames', '--name-only', context.expectedHead, 'HEAD'])
     .split('\n')
@@ -239,6 +304,7 @@ async function main() {
   }
   await write('result', result)
   checked(context)
+  operation = 'record'
   await write('verification', {
     version: 1,
     runId: context.runId,
@@ -252,11 +318,18 @@ async function main() {
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
   main().catch(async (error) => {
+    const categories = { validate: 'invalid_result', apply: 'apply_failed', check: 'check_failed' }
+    const category =
+      error instanceof GraphFailure ? error.message : (categories[operation] ?? 'unknown')
+    const prefix = category === 'timeout' ? 'initial_timeout' : 'initial_graph_failed'
+    const status =
+      error instanceof GraphFailure && error.status !== undefined ? ` status=${error.status}` : ''
+    const diagnostic = `${prefix} phase=${phase} ticket=${activeTicket} operation=${operation} category=${category}${status}`
+    console.error(diagnostic)
     if (process.env.GITHUB_OUTPUT)
       await appendFile(
         process.env.GITHUB_OUTPUT,
-        `reason=${error.message === 'initial_timeout' ? 'timeout' : 'unknown'}\n`,
-      )
-    console.error(error.message === 'initial_timeout' ? error.message : 'initial_graph_failed')
+        `reason=${category === 'timeout' ? 'timeout' : 'unknown'}\ndiagnostic=${diagnostic}\n`,
+      ).catch(() => console.error('graph_output_unavailable'))
     process.exitCode = 1
   })

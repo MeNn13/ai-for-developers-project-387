@@ -127,7 +127,11 @@ jobs:
         run: echo 'Initial deadline reached'
       - name: Reject unsuccessful graph
         if: steps.graph.outcome != 'success'
-        run: exit 1
+        env:
+          GRAPH_DIAGNOSTIC: ${{ steps.graph.outputs.diagnostic }}
+        run: |
+          echo "::error::${GRAPH_DIAGNOSTIC:-Graph diagnostic unavailable}"
+          exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           overwrite: true
@@ -279,7 +283,11 @@ jobs:
         run: echo 'Initial deadline reached'
       - name: Reject unsuccessful graph
         if: steps.graph.outcome != 'success'
-        run: exit 1
+        env:
+          GRAPH_DIAGNOSTIC: ${{ steps.graph.outputs.diagnostic }}
+        run: |
+          echo "::error::${GRAPH_DIAGNOSTIC:-Graph diagnostic unavailable}"
+          exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           overwrite: true

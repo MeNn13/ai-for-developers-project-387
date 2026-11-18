@@ -62,4 +62,5 @@ for (const path of writable) {
 }
 args.push('mise', 'run', 'check')
 const child = spawnSync('sudo', args, { stdio: 'inherit', timeout: 12 * 60 * 1000 })
-if (child.status !== 0) process.exitCode = 1
+if (child.error?.code === 'ETIMEDOUT') process.exitCode = 124
+else if (child.status !== 0) process.exitCode = 1
