@@ -1,4 +1,6 @@
 const categories = {
+  submission_missing: ['reply', 'Модель не передала результат через submit_reply.'],
+  submission_conflict: ['reply', 'Модель передала разные результаты через submit_reply.'],
   cli_start: ['cli', 'Не удалось запустить OpenCode CLI.'],
   cli_exit: ['cli', 'OpenCode CLI завершился с ошибкой.'],
   stream_limit: ['stream', 'Ответ OpenCode превысил допустимый размер.'],

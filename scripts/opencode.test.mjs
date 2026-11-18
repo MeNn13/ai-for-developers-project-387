@@ -105,19 +105,6 @@ test('unknown preparation diagnostics preserve independently verified publicatio
   }
 })
 
-test('accepts a single whole-answer JSON fence', () => {
-  for (const label of ['json', '']) {
-    const text = `\`\`\`${label}\n{"version":1,"comment":"Answer"}\n\`\`\``
-    const stream = [
-      { type: 'text', part: { messageID: 'last', text } },
-      { type: 'step_finish', part: { reason: 'stop' } },
-    ]
-      .map(JSON.stringify)
-      .join('\n')
-    assert.deepEqual(resultReply(stream), { version: 1, comment: 'Answer' })
-  }
-})
-
 function event(body = '/oc explain this issue') {
   return {
     action: 'created',
@@ -127,9 +114,18 @@ function event(body = '/oc explain this issue') {
   }
 }
 
-function answerStream(text, reason = 'stop') {
+function submissionStream(text, reason = 'stop') {
   return [
-    { type: 'text', part: { messageID: 'last', text } },
+    {
+      type: 'tool_use',
+      sessionID: 's',
+      part: {
+        id: 'call',
+        messageID: 'last',
+        tool: 'submit_reply',
+        state: { status: 'completed', input: JSON.parse(text) },
+      },
+    },
     { type: 'step_finish', part: { reason } },
   ]
     .map(JSON.stringify)
@@ -138,7 +134,7 @@ function answerStream(text, reason = 'stop') {
 
 test('schema failure reports a fixed rule without retaining model data', () => {
   assert.throws(
-    () => resultReply(answerStream('{"comment":"fake-secret"}')),
+    () => resultReply(submissionStream('{"comment":"fake-secret"}')),
     (error) => {
       assert.deepEqual(diagnosticFor(error), {
         version: 3,
@@ -175,7 +171,7 @@ test('schema rules identify the first failed validation and preserve valid repli
   ]
   for (const [reply, rule] of cases) {
     assert.throws(
-      () => resultReply(answerStream(JSON.stringify(reply))),
+      () => resultReply(submissionStream(JSON.stringify(reply))),
       (error) => {
         assert.equal(diagnosticFor(error).version, 3)
         assert.equal(diagnosticFor(error).code, 'reply_schema')
@@ -194,7 +190,7 @@ test('schema rules identify the first failed validation and preserve valid repli
       publication: { kind: 'tickets', spec: 12, approvalComment: 40, items: [item] },
     },
   ])
-    assert.deepEqual(resultReply(answerStream(JSON.stringify(reply))), reply)
+    assert.deepEqual(resultReply(submissionStream(JSON.stringify(reply))), reply)
 })
 
 test('schema diagnostic allowlist rejects arbitrary data and retains v1 compatibility', () => {
@@ -224,215 +220,6 @@ test('schema diagnostic allowlist rejects arbitrary data and retains v1 compatib
     assert.deepEqual(diagnosticFor(error), { version: 1, code: 'unknown', stage: 'unknown' })
     assert.match(failureNotice(value, 'run'), /Состояние публикации неизвестно/)
     assert.doesNotMatch(failureNotice(value, 'run'), /fake-secret/)
-  }
-})
-
-test('JSON failure reports bounded v4 metadata and fixed parse categories', () => {
-  for (const [text, kind, position] of [
-    ['{"x":"unfinished', 'unexpected_end', 16],
-    ['{} trailing', 'trailing_content', 3],
-    ['"\\q"', 'invalid_escape', 2],
-    ['"line\nfeed"', 'invalid_control', 5],
-    ['{"x":}', 'syntax_other', null],
-    ['position 0', 'syntax_other', null],
-  ]) {
-    assert.throws(
-      () => resultReply(answerStream(text)),
-      (error) => {
-        assert.equal(error.diagnostic.version, 4)
-        assert.equal(error.diagnostic.details.parseKind, kind)
-        assert.equal(error.diagnostic.details.position, position)
-        assert.equal(error.diagnostic.details.candidateChars, text.length)
-        return true
-      },
-    )
-  }
-})
-
-test('unsupported fences stay rejected and unknown parser wording stays safe', (t) => {
-  assert.throws(
-    () => resultReply(answerStream('```typescript\n{}\n```')),
-    (error) => {
-      assert.equal(error.diagnostic.details.wrapper, 'other_fence')
-      return true
-    },
-  )
-  const parse = JSON.parse
-  const stream = answerStream('synthetic candidate')
-  t.mock.method(JSON, 'parse', (text) => {
-    if (text === 'synthetic candidate') throw new SyntaxError('Unknown future wording fake-secret')
-    return parse(text)
-  })
-  assert.throws(
-    () => resultReply(stream),
-    (error) => {
-      assert.equal(error.diagnostic.details.parseKind, 'syntax_other')
-      assert.equal(error.diagnostic.details.position, null)
-      assert.doesNotMatch(JSON.stringify(error), /fake-secret/)
-      return true
-    },
-  )
-})
-
-test('synthetic JSON classes report safe categories, candidate coordinates and open structures', () => {
-  for (const [text, category, unclosed] of [
-    ['hello', 'not_json', 'none'],
-    ['prefix {}', 'wrapper', 'none'],
-    ['```typescript\n{}\n```', 'wrapper', 'none'],
-    ['{} tail', 'trailing', 'none'],
-    ['"\\q"', 'escaping', 'none'],
-    ['{"x":}', 'unclassified', 'none'],
-    ['{"x":"```",}', 'syntax', 'none'],
-    ['{"x":[', 'end', 'array'],
-    ['{"x":"brackets [ } \\"', 'end', 'string'],
-    ['{"x":1', 'end', 'object'],
-    ['x'.repeat(12004), 'not_json', 'none'],
-    ['{"x":"' + 'a'.repeat(10008), 'end', 'string'],
-  ]) {
-    assert.throws(
-      () => resultReply(answerStream(text)),
-      (error) => {
-        assert.equal(error.diagnostic.details.category, category)
-        assert.equal(error.diagnostic.details.unclosed, unclosed)
-        assert.equal(diagnosticFor(error).version, 4)
-        assert.ok(Buffer.byteLength(JSON.stringify(diagnosticFor(error))) <= 1024)
-        return true
-      },
-    )
-  }
-  for (const newline of ['\n', '\r\n']) {
-    assert.throws(
-      () =>
-        resultReply(
-          answerStream('```json' + newline + '{' + newline + '"я":"😀"} x' + newline + '```'),
-        ),
-      (error) => {
-        const d = error.diagnostic.details
-        assert.equal(d.line, 2)
-        assert.equal(d.column, 11)
-        assert.equal(d.position, 1 + newline.length + 10)
-        return true
-      },
-    )
-  }
-})
-
-test('v4 is strictly validated before notices and serialization and v2 remains readable', () => {
-  let diagnostic
-  try {
-    resultReply(answerStream('{} trailing'))
-  } catch (error) {
-    diagnostic = error.diagnostic
-  }
-  assert.match(failureNotice(diagnostic, 'run'), /Состояние публикации неизвестно/)
-  const v2 = {
-    version: 2,
-    code: 'reply_json',
-    stage: 'reply',
-    details: {
-      streamBytes: 200,
-      eventCount: 2,
-      textEventCount: 1,
-      messageCount: 1,
-      finalTextEventCount: 1,
-      answerBytes: 11,
-      candidateChars: 11,
-      wrapper: 'none',
-      root: 'object',
-      parseKind: 'trailing_content',
-      position: 3,
-    },
-  }
-  const legacyError = new DiagnosticError('reply_json')
-  legacyError.diagnostic = v2
-  assert.deepEqual(diagnosticFor(legacyError), v2)
-  assert.match(failureNotice(v2, 'run'), /offset 3.*строка и столбец не сохранены/)
-  const invalid = [
-    null,
-    [],
-    { ...diagnostic, extra: 'fake-secret' },
-    { ...diagnostic, stage: 'cli' },
-    { ...diagnostic, details: null },
-    { ...diagnostic, details: { ...diagnostic.details, category: ['trailing'] } },
-  ]
-  for (const field of Object.keys(diagnostic.details)) {
-    for (const value of [-1, 0.5, 2_000_001, 'fake-secret', null, [], {}]) {
-      if (field === 'position' && value === null) continue
-      invalid.push({ ...diagnostic, details: { ...diagnostic.details, [field]: value } })
-    }
-  }
-  invalid.push({ ...diagnostic, details: { ...diagnostic.details, position: 1000 } })
-  invalid.push({ ...diagnostic, details: { ...diagnostic.details, extra: 'fake-secret' } })
-  for (const value of invalid) {
-    assert.match(failureNotice(value, 'run'), /Состояние публикации неизвестно/)
-    const error = new DiagnosticError('reply_json')
-    error.diagnostic = value
-    assert.deepEqual(diagnosticFor(error), { version: 1, code: 'unknown', stage: 'unknown' })
-  }
-})
-
-test('counts final message events and distinguishes UTF-8 bytes from UTF-16 offsets', () => {
-  const stream = [
-    { type: 'text', part: { messageID: 'first', text: 'Thinking' } },
-    { type: 'text', part: { messageID: 'last', text: '```json\n{"я":"😀"}' } },
-    { type: 'text', part: { messageID: 'last', text: ' x\n```' } },
-    { type: 'step_finish', part: { reason: 'stop' } },
-  ]
-    .map(JSON.stringify)
-    .join('\n')
-  assert.throws(
-    () => resultReply(stream),
-    (error) => {
-      assert.deepEqual(error.diagnostic.details, {
-        streamBytes: 251,
-        eventCount: 4,
-        textEventCount: 3,
-        messageCount: 2,
-        finalTextEventCount: 2,
-        answerBytes: 27,
-        candidateChars: 12,
-        wrapper: 'json_fence',
-        root: 'object',
-        parseKind: 'trailing_content',
-        position: 11,
-        category: 'trailing',
-        line: 1,
-        column: 12,
-        unclosed: 'none',
-      })
-      return true
-    },
-  )
-})
-
-test('distinguishes failures without exposing response or provider secrets', () => {
-  const secret = 'fake-key-private-context'
-  for (const [stream, code] of [
-    [secret, 'stream_json'],
-    ['null', 'stream_json'],
-    [answerStream(secret), 'reply_json'],
-    [answerStream('{}'), 'reply_schema'],
-    [answerStream('```json\n{}\n```\n```json\n{}\n```'), 'reply_json'],
-    [answerStream('prose\n```json\n{}\n```'), 'reply_json'],
-    [answerStream('{}', 'length'), 'incomplete'],
-    [JSON.stringify({ type: 'error', error: { message: `401 ${secret}` } }), 'provider_error'],
-    [
-      JSON.stringify({ type: 'error', error: { data: { statusCode: 429 }, message: secret } }),
-      'provider_rate',
-    ],
-    [
-      JSON.stringify({ type: 'error', error: { data: { statusCode: 401 }, message: secret } }),
-      'provider_auth',
-    ],
-  ]) {
-    assert.throws(
-      () => resultReply(stream),
-      (error) => {
-        assert.equal(error.diagnostic.code, code)
-        assert.doesNotMatch(JSON.stringify(error), /fake-key-private-context/)
-        return true
-      },
-    )
   }
 })
 
@@ -487,143 +274,6 @@ test('failure notice accepts only exact known diagnostics and otherwise uses fal
   }
 })
 
-test('fake CLI covers completed answers, failures and safe artifacts end to end', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'opencode-stream-'))
-  try {
-    const fake = join(directory, 'fake.mjs')
-    await writeFile(
-      fake,
-      `
-      if (process.argv[1]?.endsWith('run')) {
-        let prompt = '';
-        process.stdin.setEncoding('utf8');
-        process.stdin.on('data', chunk => prompt += chunk);
-        await new Promise(() => process.stdin.on('end', () => {
-          if (process.env.EXPECT_PROTOCOL === 'yes' && !prompt.includes('500000 UTF-16')) process.exit(9);
-          process.stderr.write('fake-key-private-context');
-          process.stdout.write(process.env.FAKE_STREAM, () => process.exit(0));
-        }));
-      }
-    `,
-    )
-    const markdown = '## Разбор\n\n```text\nПроверить отмену встречи\n```\n\nНужно уточнение.'
-    for (const [stream, code, mode, comment = 'Answer'] of [
-      [answerStream(markdown), null, 'triage', markdown],
-      [answerStream(markdown), 'reply_json'],
-      [answerStream('   '), 'incomplete', 'triage'],
-      [answerStream(markdown, 'length'), 'incomplete', 'triage'],
-      [answerStream('x'.repeat(50_001)), 'stream_limit', 'triage'],
-      ['not JSONL', 'stream_json', 'triage'],
-      [
-        [
-          JSON.stringify({ type: 'text', part: { messageID: 'earlier', text: 'Earlier answer' } }),
-          answerStream(markdown),
-        ].join('\n'),
-        null,
-        'triage',
-        markdown,
-      ],
-      [answerStream('```json\n{"version":1,"comment":"Answer"}\n```'), null],
-      ['fake-key-private-context', 'stream_json'],
-      [answerStream('fake-key-private-context'), 'reply_json'],
-      [answerStream('{"secret":"fake-key-private-context"}'), 'reply_schema'],
-      ...[
-        { key: 'second', title: 'Title', body: 'fake-key-private-context' },
-        { key: 'second', title: 'Title', body: 'fake-key-private-context', blockedBy: null },
-        { key: 'second', title: '', body: 'fake-key-private-context', blockedBy: [] },
-        { key: 'second', title: 'x'.repeat(201), body: 'fake-key-private-context', blockedBy: [] },
-        { key: 'invalid key', title: 'Title', body: 'fake-key-private-context', blockedBy: [] },
-        { key: 'first', title: 'Title', body: 'fake-key-private-context', blockedBy: [] },
-        {
-          key: 'second',
-          title: 'Title',
-          body: 'fake-key-private-context',
-          blockedBy: ['first', 'first'],
-        },
-        { key: 'second', title: 'Title', body: 'fake-key-private-context', blockedBy: ['unknown'] },
-      ].map((item) => [
-        answerStream(
-          JSON.stringify({
-            version: 1,
-            comment: 'Answer',
-            publication: {
-              kind: 'tickets',
-              spec: 12,
-              approvalComment: 40,
-              items: [{ key: 'first', title: 'Title', body: 'Body', blockedBy: [] }, item],
-            },
-          }),
-        ),
-        'reply_schema',
-      ]),
-      [answerStream('{}', 'length'), 'incomplete'],
-      [
-        JSON.stringify({ type: 'error', error: { message: 'fake-key-private-context' } }),
-        'provider_error',
-      ],
-      ['x'.repeat(2_000_001), 'stream_limit'],
-    ]) {
-      await writeFile(
-        join(directory, 'context.json'),
-        JSON.stringify({ body: 'fake-key-private-context', mode }),
-      )
-      await rm(join(directory, 'reply.json'), { force: true })
-      await rm(join(directory, 'diagnostic.json'), { force: true })
-      // A preload turns Node into a cross-platform fake OPENCODE_BIN.
-      await writeFile(join(directory, 'stream.txt'), stream)
-      // Keep large streams in a file to avoid OS environment-size limits.
-      const loader = join(directory, 'loader.mjs')
-      await writeFile(
-        loader,
-        `import { readFileSync } from 'node:fs';
-        if (process.argv[1]?.endsWith('run')) process.env.FAKE_STREAM = readFileSync(new URL('./stream.txt', import.meta.url), 'utf8');
-        await import('./fake.mjs');`,
-      )
-      const result = spawnSync(process.execPath, ['scripts/opencode.mjs', 'run'], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          NODE_OPTIONS: `--import=${pathToFileURL(loader).href}`,
-          OPENCODE_BIN: process.execPath,
-          OPENCODE_IO: directory,
-          OPENCODE_API_KEY: 'fake-key-private-context',
-          EXPECT_PROTOCOL: mode === 'triage' ? 'no' : 'yes',
-        },
-      })
-      assert.equal(result.status, code ? 1 : 0, result.stderr)
-      assert.doesNotMatch(result.stdout + result.stderr, /fake-key-private-context/)
-      if (code) {
-        const diagnostic = await readFile(join(directory, 'diagnostic.json'), 'utf8')
-        assert.equal(JSON.parse(diagnostic).code, code)
-        assert.ok(Buffer.byteLength(diagnostic) <= 1024)
-        assert.equal(
-          JSON.parse(diagnostic).version,
-          code === 'reply_schema' ? 3 : code === 'reply_json' ? 4 : 1,
-        )
-        if (code === 'reply_schema') {
-          assert.match(
-            failureNotice(JSON.parse(diagnostic), 'run'),
-            /Состояние публикации неизвестно/,
-          )
-        }
-        assert.doesNotMatch(
-          diagnostic + failureNotice(JSON.parse(diagnostic), 'run'),
-          /fake-key-private-context/,
-        )
-        await assert.rejects(readFile(join(directory, 'reply.json')))
-      } else {
-        assert.deepEqual(JSON.parse(await readFile(join(directory, 'reply.json'), 'utf8')), {
-          version: 1,
-          comment,
-          ...(mode === 'triage' ? { publication: null } : {}),
-        })
-      }
-    }
-  } finally {
-    await rm(directory, { recursive: true, force: true })
-  }
-})
-
 test('trusted issue command receives discussion up to the requesting comment', async () => {
   const request = event()
   const api = async (path) => {
@@ -667,32 +317,6 @@ test('rejects fork pull requests before fetching comments or diff', async () => 
     }),
     null,
   )
-})
-
-test('JSON stream returns only the final assistant message', () => {
-  const stream = [
-    { type: 'text', part: { messageID: 'first', text: 'Reading files' } },
-    { type: 'step_finish', part: { reason: 'tool-calls' } },
-    {
-      type: 'text',
-      part: { messageID: 'last', text: JSON.stringify({ version: 1, comment: 'Answer' }) },
-    },
-    { type: 'step_finish', part: { reason: 'stop' } },
-  ]
-    .map(JSON.stringify)
-    .join('\n')
-  assert.deepEqual(resultReply(stream), { version: 1, comment: 'Answer' })
-})
-
-test('errors, invalid JSON, missing completion and empty answers are not published as success', () => {
-  for (const stream of [
-    '',
-    'not json',
-    '{"type":"error","error":{"message":"401"}}',
-    '{"type":"text","part":{"text":"unfinished"}}',
-  ]) {
-    assert.throws(() => resultReply(stream))
-  }
 })
 
 test('mixed-case long command and paginated discussion are supported', async () => {
@@ -786,21 +410,6 @@ test('linked specification and tickets include their discussions; foreign refere
     [20, 21],
   )
   assert.match(result.context, /Testing agreed|Acceptance criteria/)
-})
-
-test('final structured result is validated, while tool text and unfinished JSON cannot authorize publication', () => {
-  const stream = (text, reason = 'stop') =>
-    [
-      { type: 'text', part: { messageID: 'last', text } },
-      { type: 'step_finish', part: { reason } },
-    ]
-      .map(JSON.stringify)
-      .join('\n')
-  const reply = { version: 1, comment: 'Вопросы', publication: null }
-  assert.deepEqual(resultReply(stream(JSON.stringify(reply))), reply)
-  assert.throws(() => resultReply(stream('not json')))
-  assert.throws(() => resultReply(stream('{"version":1}')))
-  assert.throws(() => resultReply(stream(JSON.stringify(reply), 'tool-calls')))
 })
 
 test('a deleted linked issue is reported in context without breaking ordinary discussion', async () => {

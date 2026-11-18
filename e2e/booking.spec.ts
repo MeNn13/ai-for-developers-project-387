@@ -90,7 +90,8 @@ test('mobile guest keeps selected time and booking controls in view', async ({ p
   await selectLastWorkingDay(page)
   const occupied = page.getByRole('button', { name: `${time} занято`, exact: true })
   await expect(occupied).toBeDisabled()
-  await occupied.scrollIntoViewIfNeeded()
+  // Center in both scroll containers before asserting complete visibility.
+  await occupied.evaluate((button) => button.scrollIntoView({ block: 'center' }))
   await expect(occupied).toBeInViewport({ ratio: 1 })
   await expect(occupied).toContainText('занято')
   const laterSlot = page.getByRole('button', { name: /^\d{2}:\d{2}–\d{2}:\d{2}$/ }).first()

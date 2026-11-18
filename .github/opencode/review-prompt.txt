@@ -10,5 +10,5 @@ Account for previously discussed/resolved findings; do not repeat resolved issue
 without new evidence. Report confirmed defects with file, line, triggering
 conditions and consequences. If none are confirmed say so directly. Do not repeat
 linter output. Pending, unavailable or failed CI is not successful verification.
-Return the existing JSON reply protocol with publication strictly null. The comment
+Call submit_reply using the existing reply protocol with publication strictly null. The comment
 must describe evidence limits and the exact head SHA; never claim tests were run.

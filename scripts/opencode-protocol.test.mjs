@@ -29,7 +29,16 @@ test('every schema reason gives a fixed explanation with no response values', ()
     const reply = structuredClone(protocolExamples[2])
     change(reply.publication.items[1])
     const stream = [
-      { type: 'text', part: { messageID: 'last', text: JSON.stringify(reply) } },
+      {
+        type: 'tool_use',
+        sessionID: 's',
+        part: {
+          id: 'call',
+          messageID: 'last',
+          tool: 'submit_reply',
+          state: { status: 'completed', input: reply },
+        },
+      },
       { type: 'step_finish', part: { reason: 'stop' } },
     ]
       .map(JSON.stringify)
@@ -51,7 +60,16 @@ test('every schema reason gives a fixed explanation with no response values', ()
   const duplicate = structuredClone(protocolExamples[2])
   duplicate.publication.items[1].key = 'first'
   const stream = [
-    { type: 'text', part: { messageID: 'last', text: JSON.stringify(duplicate) } },
+    {
+      type: 'tool_use',
+      sessionID: 's',
+      part: {
+        id: 'call',
+        messageID: 'last',
+        tool: 'submit_reply',
+        state: { status: 'completed', input: duplicate },
+      },
+    },
     { type: 'step_finish', part: { reason: 'stop' } },
   ]
     .map(JSON.stringify)
@@ -95,7 +113,16 @@ test('missing blockedBy reports a safe actionable reason', () => {
   const reply = structuredClone(protocolExamples[1])
   delete reply.publication.items[0].blockedBy
   const stream = [
-    { type: 'text', part: { messageID: 'last', text: JSON.stringify(reply) } },
+    {
+      type: 'tool_use',
+      sessionID: 's',
+      part: {
+        id: 'call',
+        messageID: 'last',
+        tool: 'submit_reply',
+        state: { status: 'completed', input: reply },
+      },
+    },
     { type: 'step_finish', part: { reason: 'stop' } },
   ]
     .map(JSON.stringify)
@@ -122,7 +149,16 @@ test('published protocol examples are accepted by preparation and public validat
   for (const example of protocolExamples) {
     assert.doesNotThrow(() => validateReply(example))
     const stream = [
-      { type: 'text', part: { messageID: 'last', text: JSON.stringify(example) } },
+      {
+        type: 'tool_use',
+        sessionID: 's',
+        part: {
+          id: 'call',
+          messageID: 'last',
+          tool: 'submit_reply',
+          state: { status: 'completed', input: example },
+        },
+      },
       { type: 'step_finish', part: { reason: 'stop' } },
     ]
       .map(JSON.stringify)
@@ -135,7 +171,16 @@ test('published protocol examples are accepted by preparation and public validat
 test('compatibility preserves optional publication, extra fields and UTF-16 whitespace boundaries', () => {
   const stream = (reply) =>
     [
-      { type: 'text', part: { messageID: 'last', text: JSON.stringify(reply) } },
+      {
+        type: 'tool_use',
+        sessionID: 's',
+        part: {
+          id: 'call',
+          messageID: 'last',
+          tool: 'submit_reply',
+          state: { status: 'completed', input: reply },
+        },
+      },
       { type: 'step_finish', part: { reason: 'stop' } },
     ]
       .map(JSON.stringify)

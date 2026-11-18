@@ -2,6 +2,52 @@ const positive = (value) => Number.isSafeInteger(value) && value > 0
 const limits = { comment: 500_000, items: 20, title: 200, body: 50_000 }
 const keyPattern = /^[a-z][a-z0-9-]{0,39}$/
 
+const itemSchema = {
+  type: 'object',
+  required: ['key', 'title', 'body', 'blockedBy'],
+  properties: {
+    key: { type: 'string', pattern: keyPattern.source, maxLength: 40 },
+    title: { type: 'string', minLength: 1, maxLength: limits.title },
+    body: { type: 'string', minLength: 1, maxLength: limits.body },
+    blockedBy: { type: 'array', items: { type: 'string' }, uniqueItems: true },
+  },
+}
+
+export const replySchema = {
+  type: 'object',
+  required: ['version', 'comment'],
+  properties: {
+    version: { type: 'integer', const: 1 },
+    comment: { type: 'string', minLength: 1, maxLength: limits.comment },
+    publication: {
+      anyOf: [
+        { type: 'null' },
+        ...['spec', 'tickets'].map((kind) => ({
+          type: 'object',
+          required: ['kind', 'items', ...(kind === 'tickets' ? ['spec', 'approvalComment'] : [])],
+          properties: {
+            kind: { type: 'string', const: kind },
+            items: {
+              type: 'array',
+              minItems: 1,
+              maxItems: kind === 'spec' ? 1 : limits.items,
+              items: itemSchema,
+            },
+            ...(kind === 'tickets'
+              ? Object.fromEntries(
+                  ['spec', 'approvalComment'].map((field) => [
+                    field,
+                    { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+                  ]),
+                )
+              : {}),
+          },
+        })),
+      ],
+    },
+  },
+}
+
 export const protocolExamples = [
   { version: 1, comment: 'Russian response in Markdown', publication: null },
   {
@@ -46,7 +92,9 @@ export const protocolExamples = [
 
 export function protocolInstruction() {
   return [
-    'OUTPUT PROTOCOL: Return one JSON object, without markdown fences.',
+    'OUTPUT PROTOCOL: Call submit_reply with the complete result. Final response text is ignored.',
+    'Put Markdown directly in comment and body strings. Do not wrap the result in a JSON string.',
+    'After acceptance do not change the result. Only identical repeated submissions are allowed.',
     'version must be 1. comment must be a nonempty string after JavaScript trim(), at most ' +
       limits.comment +
       ' UTF-16 code units.',
