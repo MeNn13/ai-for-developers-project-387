@@ -1,5 +1,6 @@
 ﻿import { appendFile, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
+import config from '../.github/opencode/opencode.json' with { type: 'json' }
 import { unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -233,16 +234,7 @@ async function main() {
       JSON.stringify(await read('prompt'))
     const child = spawnSync(
       process.env.OPENCODE_BIN ?? 'opencode',
-      [
-        'run',
-        '--standalone',
-        '--format',
-        'json',
-        '--agent',
-        'discussion',
-        '--model',
-        'opencode/glm-5.3-flash-free',
-      ],
+      ['run', '--standalone', '--format', 'json', '--agent', 'discussion', '--model', config.model],
       {
         input: prompt,
         encoding: 'utf8',

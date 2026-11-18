@@ -1,5 +1,6 @@
 import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
+import config from '../.github/opencode/opencode.json' with { type: 'json' }
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
@@ -64,16 +65,7 @@ function model(context, instruction) {
   // Every ticket/review is a fresh CLI session, with read-only repository tools.
   const stream = command(
     process.env.OPENCODE_BIN ?? 'opencode',
-    [
-      'run',
-      '--standalone',
-      '--format',
-      'json',
-      '--agent',
-      'discussion',
-      '--model',
-      'opencode/glm-5.3-flash-free',
-    ],
+    ['run', '--standalone', '--format', 'json', '--agent', 'discussion', '--model', config.model],
     {
       input: instruction + '\nUNTRUSTED APPROVED CONTEXT:\n' + JSON.stringify(context),
       timeout: remaining(context),

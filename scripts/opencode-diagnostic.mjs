@@ -3,6 +3,7 @@ const categories = {
   submission_conflict: ['reply', 'Модель передала разные результаты через submit_reply.'],
   cli_start: ['cli', 'Не удалось запустить OpenCode CLI.'],
   cli_exit: ['cli', 'OpenCode CLI завершился с ошибкой.'],
+  model_unavailable: ['provider', 'Выбранная модель недоступна у провайдера.'],
   stream_limit: ['stream', 'Ответ OpenCode превысил допустимый размер.'],
   provider_error: ['provider', 'Провайдер модели сообщил об ошибке.'],
   provider_auth: ['provider', 'Провайдер отклонил авторизацию.'],
@@ -22,6 +23,8 @@ export class DiagnosticError extends Error {
   constructor(code, details) {
     super(code)
     this.diagnostic = { version: 1, code, stage: categories[code][0] }
+    if (['model_unavailable', 'cli_exit'].includes(code) && Number.isInteger(details?.exitCode))
+      this.diagnostic = { ...this.diagnostic, version: 5, exitCode: details.exitCode }
     if (['reply_json', 'reply_schema'].includes(code) && details !== undefined)
       this.diagnostic = { version: 2, code, stage: 'reply', details }
     if (code === 'reply_schema' && details?.reason !== undefined)
@@ -68,6 +71,14 @@ function validDiagnostic(value) {
       typeof value.details.state === 'string' &&
       Object.hasOwn(publicationReasons, value.details.reason) &&
       ['none', 'possible', 'unknown'].includes(value.details.state)
+    )
+  if (value.version === 5)
+    return (
+      ['model_unavailable', 'cli_exit'].includes(value.code) &&
+      exactKeys(value, 'version,code,stage,exitCode') &&
+      Number.isInteger(value.exitCode) &&
+      value.exitCode > 0 &&
+      value.exitCode <= 255
     )
   if (value.version === 1) return exactKeys(value, 'version,code,stage')
   if (value.version === 4) {
