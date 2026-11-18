@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/glm-5.3-flash-free",
+  "model": "opencode/deepseek-v4.1-flash-free",
   "default_agent": "discussion",
   "share": "disabled",
   "snapshots": false,
@@ -27,12 +27,12 @@
   "agents": {
     "discussion": {
       "mode": "primary",
-      "model": "opencode/glm-5.3-flash-free",
+      "model": "opencode/deepseek-v4.1-flash-free",
       "description": "Read repository instructions and answer GitHub discussions",
       "steps": 20
     },
-    "title": { "model": "opencode/glm-5.3-flash-free" },
-    "summary": { "model": "opencode/glm-5.3-flash-free" },
-    "compaction": { "model": "opencode/glm-5.3-flash-free" }
+    "title": { "model": "opencode/deepseek-v4.1-flash-free" },
+    "summary": { "model": "opencode/deepseek-v4.1-flash-free" },
+    "compaction": { "model": "opencode/deepseek-v4.1-flash-free" }
   }
 }

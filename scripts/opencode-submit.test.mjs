@@ -92,6 +92,21 @@ async function invoke(events, { status = 0, stale = false, mode, rawStream } = {
   }
 }
 
+test('CLI preserves only the category and exit code when a model is unavailable', async () => {
+  const event = {
+    type: 'error',
+    error: { type: 'provider.no-route', message: 'Model unavailable: fake-private-key' },
+  }
+  const result = await invoke([event, { type: 'step_start' }], { status: 1 })
+  assert.equal(result.reply, null)
+  assert.deepEqual(result.diagnostic, {
+    version: 5,
+    code: 'model_unavailable',
+    stage: 'provider',
+    exitCode: 1,
+  })
+})
+
 test('manual CLI accepts a submitted Markdown reply without final text', async () => {
   const result = await invoke([submission(), stop])
   assert.equal(result.status, 0, JSON.stringify(result))

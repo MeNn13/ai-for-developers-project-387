@@ -2,12 +2,11 @@ import { validateReply, ReplyValidationError, protocolInstruction } from './open
 import { appendFile, readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { spawn } from 'node:child_process'
+import config from '../.github/opencode/opencode.json' with { type: 'json' }
 import { resolve, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { trustedHuman, triageEligible } from './opencode-publish.mjs'
 import { DiagnosticError, diagnosticFor } from './opencode-diagnostic.mjs'
-
-const model = 'opencode/glm-5.3-flash-free'
 
 // Only deliberate internal diagnostics may be printed in public logs.
 class WorkflowError extends Error {}
@@ -292,7 +291,7 @@ export async function run(directory, options = {}) {
       '--agent',
       'discussion',
       '--model',
-      model,
+      config.model,
       '--title',
       options.title ?? 'GitHub discussion',
     ],
@@ -315,7 +314,19 @@ export async function run(directory, options = {}) {
     child.once('close', resolveExit)
   })
   if (bytes > 2_000_000) throw new DiagnosticError('stream_limit')
-  if (status !== 0) throw new DiagnosticError('cli_exit')
+  if (status !== 0) {
+    for (const line of stream.split(/\r?\n/)) {
+      let event
+      try {
+        event = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (event?.type === 'error' && event.error?.type === 'provider.no-route')
+        throw new DiagnosticError('model_unavailable', { exitCode: status })
+    }
+    throw new DiagnosticError('cli_exit', { exitCode: status })
+  }
   let reply
   if (automatic) {
     const comment = resultText(stream).trim()
