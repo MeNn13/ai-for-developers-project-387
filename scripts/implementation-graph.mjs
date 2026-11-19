@@ -4,17 +4,12 @@ import config from '../.github/opencode/opencode.json' with { type: 'json' }
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
+import { decodeModel, ImplementationFailure } from './implementation-model-output.mjs'
 import { validateRepair } from './implementation-repair.mjs'
 
 const phase = ['first', 'final'].includes(process.argv[2]) ? process.argv[2] : 'unknown'
 let activeTicket = 'none'
 let operation = 'preflight'
-class GraphFailure extends Error {
-  constructor(category, status) {
-    super(category)
-    this.status = status
-  }
-}
 const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
 const requireValue = (ok) => {
   if (!ok) throw new Error('initial_graph_failed')
@@ -84,7 +79,7 @@ function command(bin, args, options = {}, modelCall = false) {
     },
   )
   if ((bounded && [124, 137].includes(child.status)) || child.error?.code === 'ETIMEDOUT')
-    throw new GraphFailure('timeout')
+    throw new ImplementationFailure('timeout')
   if (modelCall) return decodeModel(child, bounded)
   requireValue(child.status === 0)
   return child.stdout?.trim()
@@ -92,7 +87,7 @@ function command(bin, args, options = {}, modelCall = false) {
 const git = (args, options) => command('git', args, options)
 function remaining(context) {
   const ms = context.deadline - Date.now()
-  if (ms <= 0) throw new GraphFailure('timeout')
+  if (ms <= 0) throw new ImplementationFailure('timeout')
   return ms
 }
 function clean() {
@@ -108,7 +103,7 @@ function checked(context) {
   clean()
 }
 function model(context, instruction) {
-  if (!process.env.OPENCODE_API_KEY) throw new GraphFailure('model_launch')
+  if (!process.env.OPENCODE_API_KEY) throw new ImplementationFailure('model_launch')
   // Every ticket/review is a fresh CLI session, with read-only repository tools.
   return command(
     process.env.OPENCODE_BIN ?? 'opencode',
@@ -117,6 +112,7 @@ function model(context, instruction) {
       input:
         instruction +
         '\nThe final assistant message must contain one complete JSON object, with no Markdown fences or surrounding prose.' +
+        '\nIf the contract changes, include the updated contract/main.tsp in files. The controller generates OpenAPI, the TypeScript client, and C# DTOs from it. Omit those generated files from the reply.' +
         '\nUNTRUSTED APPROVED CONTEXT:\n' +
         JSON.stringify(context),
       timeout: remaining(context),
@@ -126,79 +122,6 @@ function model(context, instruction) {
     },
     true,
   )
-}
-function decodeModel(child, bounded) {
-  if (child.error?.code === 'ENOBUFS') throw new GraphFailure('model_output_limit')
-  if (child.error || (bounded && [126, 127].includes(child.status)))
-    throw new GraphFailure('model_launch')
-  const messages = new Map()
-  let sessionID
-  let malformed = false
-  let unknownError = false
-  for (const line of (child.stdout ?? '').split(/\r?\n/).filter(Boolean)) {
-    try {
-      const item = JSON.parse(line)
-      if (typeof item?.type !== 'string') throw new Error()
-      if (item.type === 'error') {
-        if (
-          ['APIError', 'ProviderAuthError'].includes(item.error?.name) ||
-          ['api', 'provider-auth'].includes(item.error?.type)
-        ) {
-          const status = item.error.status ?? item.error.data?.statusCode
-          throw new GraphFailure(
-            'provider_error',
-            Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined,
-          )
-        }
-        unknownError = true
-        continue
-      }
-      if (!['step_start', 'step_finish', 'text', 'tool_use', 'reasoning'].includes(item.type))
-        throw new Error()
-      const { part } = item
-      sessionID ??= item.sessionID
-      if (
-        typeof sessionID !== 'string' ||
-        !sessionID ||
-        item.sessionID !== sessionID ||
-        part?.sessionID !== sessionID ||
-        typeof part.messageID !== 'string' ||
-        !part.messageID
-      )
-        throw new Error()
-      const message = messages.get(part.messageID) ?? { text: [], reason: undefined }
-      messages.set(part.messageID, message)
-      if (item.type === 'text') {
-        if (typeof part.text !== 'string') throw new Error()
-        // Reconciliation may emit more text for a message whose step already ended.
-        message.text.push(part.text)
-      }
-      if (item.type === 'step_finish') {
-        if (typeof part.reason !== 'string' || message.reason !== undefined) throw new Error()
-        message.reason = part.reason
-      }
-    } catch (error) {
-      if (error instanceof GraphFailure) throw error
-      malformed = true
-    }
-  }
-  if (unknownError) throw new GraphFailure('unknown')
-  if (child.status !== 0)
-    throw new GraphFailure(
-      'model_exit',
-      Number.isInteger(child.status) && child.status >= 0 && child.status <= 255
-        ? child.status
-        : undefined,
-    )
-  if (malformed) throw new GraphFailure('invalid_event_stream')
-  const final = [...messages.values()].at(-1)
-  if (final?.reason !== 'stop' || final.text.length === 0)
-    throw new GraphFailure('incomplete_stream')
-  try {
-    return JSON.parse(final.text.join(''))
-  } catch {
-    throw new GraphFailure('invalid_result_json')
-  }
 }
 async function integrate(context, reply, label) {
   operation = 'apply'
@@ -274,7 +197,7 @@ async function main() {
       operation = 'model'
       const reply = model(
         { ...context, activeTicket: ticket, integrations: history },
-        'Apply implement-spec and tdd at approved seams. Implement ONLY activeTicket. Read AGENTS and applicable docs. Shell, writes, network and delegated tools are prohibited. Return JSON {version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}. English Conventional Commit references active ticket. Only supply source files; trusted generation handles changes to contract/main.tsp. Explain risk by consequences and data rollback sufficiency. No repeated attempts.',
+        'Apply implement-spec and tdd at approved seams. Implement ONLY activeTicket. Read AGENTS and applicable docs. Shell, writes, network and delegated tools are prohibited. Return JSON {version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}. English Conventional Commit references active ticket. Explain risk by consequences and data rollback sufficiency. No repeated attempts.',
       )
       const record = await integrate(
         { ...context, tickets: [ticket.number] },
@@ -308,7 +231,7 @@ async function main() {
       }
       const review = model(
         { ...context, integrations: records, review: reviewContext },
-        `Perform independent ${axis} review of entire integrated graph against base ${context.base}. Read changes and approved context. Return JSON {findings:[{path,line,conditions,consequences}],risk,rollback,repair:null|{version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}}. Each finding has a positive integer line. Include a repair if findings is nonempty; otherwise use repair:null. Only supply source files in repairs. Summarize consequences and risk of ENTIRE change; explain whether reverting code suffices for data. Provide only confirmed defects. No writes or shell. Review is separate from external GitHub author review.`,
+        `Perform independent ${axis} review of entire integrated graph against base ${context.base}. Read changes and approved context. Return JSON {findings:[{path,line,conditions,consequences}],risk,rollback,repair:null|{version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}}. Each finding has a positive integer line. Include a repair if findings is nonempty; otherwise use repair:null. Summarize consequences and risk of ENTIRE change; explain whether reverting code suffices for data. Provide only confirmed defects. No writes or shell. Review is separate from external GitHub author review.`,
       )
       operation = 'validate'
       validateReview(review)
@@ -383,10 +306,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
   main().catch(async (error) => {
     const categories = { validate: 'invalid_result', apply: 'apply_failed', check: 'check_failed' }
     const category =
-      error instanceof GraphFailure ? error.message : (categories[operation] ?? 'unknown')
+      error instanceof ImplementationFailure ? error.message : (categories[operation] ?? 'unknown')
     const prefix = category === 'timeout' ? 'initial_timeout' : 'initial_graph_failed'
     const status =
-      error instanceof GraphFailure && error.status !== undefined ? ` status=${error.status}` : ''
+      error instanceof ImplementationFailure && error.status !== undefined
+        ? ` status=${error.status}`
+        : ''
     const diagnostic = `${prefix} phase=${phase} ticket=${activeTicket} operation=${operation} category=${category}${status}`
     console.error(diagnostic)
     if (process.env.GITHUB_OUTPUT)

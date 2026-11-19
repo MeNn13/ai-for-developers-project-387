@@ -84,7 +84,23 @@ test('repair model has no write token and emits bounded file data with draft rea
   writeFileSync(join(dir, 'context.json'), JSON.stringify({ tickets: [41] }))
   writeFileSync(
     cli,
-    `import assert from 'node:assert/strict'; assert.equal(process.env.GH_TOKEN, undefined); assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY, undefined); console.log(JSON.stringify({type:'text',part:{text:JSON.stringify(${JSON.stringify(reply)})}})); console.log(JSON.stringify({type:'step_finish',part:{reason:'stop'}}));`,
+    `import assert from 'node:assert/strict'
+    assert.equal(process.env.GH_TOKEN, undefined)
+    assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY, undefined)
+    const emit = (type, messageID, part) => console.log(JSON.stringify({
+      type, timestamp: 1, sessionID: 'ses_repair',
+      part: { sessionID: 'ses_repair', messageID, ...part },
+    }))
+    emit('step_start', 'msg_read', { type: 'step-start' })
+    emit('text', 'msg_read', { type: 'text', text: 'I will read the instructions.' })
+    emit('tool_use', 'msg_read', { type: 'tool', tool: 'read', state: { status: 'completed' } })
+    emit('step_finish', 'msg_read', { type: 'step-finish', reason: 'tool-calls' })
+    emit('step_start', 'msg_final', { type: 'step-start' })
+    const json = JSON.stringify(${JSON.stringify(reply)})
+    emit('text', 'msg_final', { type: 'text', text: json.slice(0, 10) })
+    emit('text', 'msg_final', { type: 'text', text: json.slice(10) })
+    emit('step_finish', 'msg_final', { type: 'step-finish', reason: 'stop' })
+    `,
   )
   // A preload implements the process CLI adapter without a platform-specific shell shim.
   const preload = join(dir, 'adapter.mjs')
@@ -112,7 +128,9 @@ test('repair model has no write token and emits bounded file data with draft rea
     },
   )
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(JSON.parse(readFileSync(join(dir, 'reply.json'))).ready, false)
+  const decoded = JSON.parse(readFileSync(join(dir, 'reply.json')))
+  assert.equal(decoded.ready, false)
+  assert.deepEqual(decoded.files, reply.files)
   assert.throws(
     () =>
       validateRepair(

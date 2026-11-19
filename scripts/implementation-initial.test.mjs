@@ -312,19 +312,31 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
     assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY, undefined)
     const context = JSON.parse(input.split('UNTRUSTED APPROVED CONTEXT:\\n')[1])
     const n = context.activeTicket?.number
+    const standards = input.startsWith('Perform independent Standards review')
     if (!n) {
       assert.equal(context.review.base, context.base)
       assert.equal(context.review.head, context.integrations.at(-1).sha)
       for (const ticket of [3,4]) {
         assert.ok(context.review.diff.includes('diff --git a/frontend/src/ticket' + ticket + '.ts'))
-        assert.ok(context.review.diff.includes('+export const ticket' + ticket + ' = true'))
+        const expected = ticket === 4 && !standards ? 'false' : 'true'
+        assert.ok(context.review.diff.includes('+export const ticket' + ticket + ' = ' + expected))
+      }
+    }
+    const path = 'frontend/src/ticket4.ts'
+    const review = { findings: [], risk: 'Entire UI change', rollback: 'Revert; no persistent data', repair: null }
+    if (standards) {
+      review.findings.push({ path, line: 1, conditions: 'Flag is enabled', consequences: 'Fixture defaults to enabled' })
+      review.repair = {
+        version: 1, message: 'fix: disable the fixture flag (#4)',
+        files: [{path, mode: '100644', content: 'export const ticket4 = false\\n'}],
+        risk: 'Changes default flag', rollback: 'Revert; no persistent data',
       }
     }
     const reply = n ? {
       version: 1, message: 'feat: implement ticket (#' + n + ')',
       files: [{path: 'frontend/src/ticket' + n + '.ts', mode: '100644', content: 'export const ticket' + n + ' = true\\n'}],
       risk: 'UI consequences', rollback: 'Revert; no persistent data',
-    } : { findings: [], risk: 'Entire UI change', rollback: 'Revert; no persistent data', repair: null }
+    } : review
     emit('step_start', 'msg_read', {type: 'step-start'})
     text('I will read the instructions.', 'msg_read')
     emit('tool_use', 'msg_read', {type: 'tool', tool: 'read', state: {status: 'completed'}})
@@ -431,13 +443,16 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
   const final = execute('final')
   assert.equal(final.ready, true)
   assert.equal(git('rev-parse', final.candidateSha + '^'), first.candidateSha)
+  const integrations = JSON.parse(readFileSync(join(io, 'integrations.json')))
   assert.deepEqual(
-    JSON.parse(readFileSync(join(io, 'integrations.json'))).map((r) => r.ticket),
-    [3, 4],
+    integrations.map((r) => r.label),
+    ['ticket-3', 'ticket-4', 'review-Standards'],
   )
+  assert.equal(integrations[2].base, integrations[1].sha)
+  assert.equal(integrations[2].conclusion, 'success')
   assert.equal(
     git('show', final.candidateSha + ':frontend/src/ticket4.ts'),
-    'export const ticket4 = true',
+    'export const ticket4 = false',
   )
   assert.equal(JSON.parse(readFileSync(join(io, 'verification.json'))).sha, final.candidateSha)
   assert.equal(git('status', '--porcelain'), '')
