@@ -142,6 +142,8 @@ test('fresh review submits and publishes one comment for the exact head of a dra
       if (process.argv[1]?.endsWith('run')) {
         let input = ''; for await (const part of process.stdin) input += part;
         if (!input.includes('independent PR review') || !input.includes('publication strictly null') ||
+            !input.includes('publication must be explicitly null.') ||
+            input.includes('publication may be absent') || input.includes('publication.kind must be spec or tickets') ||
             !process.argv.includes('--standalone') || process.argv.includes('--continue') ||
             process.env.GH_TOKEN) process.exit(3);
         const submission = { type: 'tool_use', sessionID: 'review', part: { id: 'reply', tool: 'submit_reply', state: { status: 'completed', input: { version: 1, comment: 'No confirmed defects', publication: null, extra: 'private-provider-context' } }, messageID: 'r' } };

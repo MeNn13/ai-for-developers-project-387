@@ -282,7 +282,7 @@ export async function run(directory, options = {}) {
   } catch {
     throw new DiagnosticError('file_read')
   }
-  if (mode !== 'triage') prompt += `\n\n${protocolInstruction()}`
+  if (mode !== 'triage') prompt += `\n\n${protocolInstruction({ review: mode === 'review' })}`
   const child = spawn(
     process.env.OPENCODE_BIN ?? 'opencode',
     [
