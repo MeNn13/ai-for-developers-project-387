@@ -2,9 +2,18 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { initialContext, initialAdmission } from './implementation-initial.mjs'
 import { prepare } from './opencode.mjs'
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from 'node:fs'
+import {
+  copyFileSync,
+  cpSync,
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { spawnSync, execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { initialCompletion } from './implementation-initial-completion.mjs'
@@ -274,7 +283,49 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
   git('init', '-q')
   git('config', 'user.name', 'Fixture')
   git('config', 'user.email', 'fixture@example.com')
+  git('config', 'core.autocrlf', 'false')
   writeFileSync(join(candidate, 'README.md'), 'fixture')
+  writeFileSync(join(candidate, 'GLOSSARY.md'), '# Glossary\n')
+  const project = resolve(import.meta.dirname, '..')
+  const tracked = execFileSync(
+    'git',
+    [
+      'ls-files',
+      '--',
+      'contract',
+      'scripts/generate.mjs',
+      'frontend/src/api/generated',
+      'backend/BookingCalendar.Api/Generated',
+    ],
+    { cwd: project, encoding: 'utf8' },
+  )
+    .trim()
+    .split(/\r?\n/)
+  for (const path of tracked) {
+    const target = join(candidate, path)
+    mkdirSync(dirname(target), { recursive: true })
+    copyFileSync(join(project, path), target)
+  }
+  symlinkSync(
+    join(project, 'node_modules'),
+    join(candidate, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  )
+  // The server generator patches its emitter in place, even during restricted checks.
+  cpSync(
+    join(project, 'contract/server/node_modules'),
+    join(candidate, 'contract/server/node_modules'),
+    {
+      recursive: true,
+      verbatimSymlinks: true,
+    },
+  )
+  writeFileSync(join(candidate, '.gitignore'), 'node_modules/\nartifacts/\n')
+  const contract =
+    readFileSync(join(candidate, 'contract/main.tsp'), 'utf8').replaceAll('\r\n', '\n') +
+    '\n@route("/meetings/{id}")\n@delete\n@operationId("cancelMeeting")\nop cancelMeeting(@path id: string): NoContentResponse | CancelFixtureError;\n' +
+    '@error model CancelFixtureError { @statusCode statusCode: 409; @body body: CancelFixtureProblem; }\n' +
+    'model CancelFixtureProblem { type: "meeting-already-started"; }\n'
   git('add', '.')
   git('commit', '-qm', 'chore: initialize fixture')
   const base = git('rev-parse', 'HEAD')
@@ -284,12 +335,13 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
     trustedSha: base,
     base,
     expectedHead: base,
-    tickets: [3, 4],
+    tickets: [57, 58, 59],
     graph: [
-      { number: 3, blockedBy: [] },
-      { number: 4, blockedBy: [3] },
+      { number: 57, blockedBy: [] },
+      { number: 58, blockedBy: [57] },
+      { number: 59, blockedBy: [58] },
     ],
-    deadline: Date.now() + 60000,
+    deadline: Date.now() + 120000,
     commitDate: '2026-11-15T00:00:00Z',
   }
   const fake = join(dir, 'model.mjs')
@@ -302,33 +354,37 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
     const finish = (reason = 'stop', id = 'msg_final') =>
       emit('step_finish', id, { type: 'step-finish', reason })
   `
+  const fakeReplies = join(io, 'fake-replies.json')
+  writeFileSync(fakeReplies, JSON.stringify({ contract }))
   writeFileSync(
     fake,
     `${fixtureEvents}
     import assert from 'node:assert/strict'
+    import {readFileSync} from 'node:fs'
     let input = ''
     for await (const chunk of process.stdin) input += chunk
     assert.equal(process.env.GH_TOKEN, undefined)
     assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY, undefined)
     const context = JSON.parse(input.split('UNTRUSTED APPROVED CONTEXT:\\n')[1])
+    const overrides = JSON.parse(readFileSync(${JSON.stringify(fakeReplies)}, 'utf8'))
     const n = context.activeTicket?.number
     const standards = input.startsWith('Perform independent Standards review')
     if (!n) {
       assert.equal(context.review.base, context.base)
       assert.equal(context.review.head, context.integrations.at(-1).sha)
-      for (const ticket of [3,4]) {
+      for (const ticket of [57,58,59]) {
         assert.ok(context.review.diff.includes('diff --git a/frontend/src/ticket' + ticket + '.ts'))
-        const expected = ticket === 4 && !standards ? 'false' : 'true'
+        const expected = ticket === 58 && !standards ? 'false' : 'true'
         assert.ok(context.review.diff.includes('+export const ticket' + ticket + ' = ' + expected))
       }
     }
-    const path = 'frontend/src/ticket4.ts'
+    const path = 'frontend/src/ticket58.ts'
     const review = { findings: [], risk: 'Entire UI change', rollback: 'Revert; no persistent data', repair: null }
     if (standards) {
       review.findings.push({ path, line: 1, conditions: 'Flag is enabled', consequences: 'Fixture defaults to enabled' })
       review.repair = {
-        version: 1, message: 'fix: disable the fixture flag (#4)',
-        files: [{path, mode: '100644', content: 'export const ticket4 = false\\n'}],
+        version: 1, message: 'fix: disable the fixture flag (#58)',
+        files: [{path, mode: '100644', content: 'export const ticket58 = false\\n'}],
         risk: 'Changes default flag', rollback: 'Revert; no persistent data',
       }
     }
@@ -337,12 +393,19 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
       files: [{path: 'frontend/src/ticket' + n + '.ts', mode: '100644', content: 'export const ticket' + n + ' = true\\n'}],
       risk: 'UI consequences', rollback: 'Revert; no persistent data',
     } : review
+    if (n === 57) reply.files.push(
+      {path: 'contract/main.tsp', mode: '100644', content: overrides.contract},
+      {path: 'GLOSSARY.md', mode: '100644', content: '# Glossary\\n\\n## Отмена встречи\\n'},
+    )
+    if (n === 59) reply.files.push(
+      {path: 'README.md', mode: '100644', content: 'Отмена освобождает слот.\\n'},
+    )
     emit('step_start', 'msg_read', {type: 'step-start'})
     text('I will read the instructions.', 'msg_read')
     emit('tool_use', 'msg_read', {type: 'tool', tool: 'read', state: {status: 'completed'}})
     finish('tool-calls', 'msg_read')
     emit('step_start', 'msg_final', {type: 'step-start'})
-    const json = JSON.stringify(reply)
+    const json = JSON.stringify(overrides.result ?? reply)
     text(json.slice(0, 10))
     finish()
     text(json.slice(10))
@@ -397,11 +460,26 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
     fake,
     `console.error('SECRET_MARKER'); console.log(JSON.stringify({type:'error',error:{type:'api',message:'SECRET_MARKER',status:429}})); process.exitCode=1`,
   )
-  execute('first', 'phase=first ticket=3 operation=model category=provider_error status=429')
+  execute('first', 'phase=first ticket=57 operation=model category=provider_error status=429')
   writeFileSync(fake, successModel)
   const first = execute('first')
   assert.equal(first.ready, false)
   assert.equal(git('rev-parse', first.candidateSha + '^'), base)
+  assert.match(git('show', 'HEAD:GLOSSARY.md'), /Отмена встречи/)
+  assert.match(git('show', 'HEAD:contract/openapi/openapi.yaml'), /operationId: cancelMeeting/)
+  assert.ok(
+    first.files.some(
+      ({ path, content }) =>
+        path.startsWith('frontend/src/api/generated/') && content?.includes('cancelMeeting'),
+    ),
+  )
+  assert.ok(
+    first.files.some(
+      ({ path, content }) =>
+        path.startsWith('backend/BookingCalendar.Api/Generated/') &&
+        content?.includes('CancelFixtureProblem'),
+    ),
+  )
   context.expectedHead = first.candidateSha
   for (const [script, diagnostic] of [
     [
@@ -426,45 +504,110 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
       `console.log(JSON.stringify({type:'error',error:{name:'SECRET_MARKER'}}))`,
       'operation=model category=unknown',
     ],
-    ["text('{}'); finish()", 'operation=validate category=invalid_result'],
     [
-      `text(JSON.stringify({
-        version: 1, message: 'feat: implement another ticket (#3)',
-        files: [{path:'frontend/src/ticket4.ts',mode:'100644',content:'export const ticket4 = true'}],
-        risk: 'UI consequences', rollback: 'No persistent data',
-      })); finish()`,
-      'operation=validate category=invalid_result',
+      "text('{}'); finish()",
+      'operation=validate category=invalid_result field=result.version rule=required',
     ],
   ]) {
     writeFileSync(fake, fixtureEvents + '\n' + script)
-    execute('final', 'phase=final ticket=4 ' + diagnostic)
+    execute('final', 'phase=final ticket=58 ' + diagnostic)
   }
   writeFileSync(fake, successModel)
+  const file = { path: 'frontend/src/ticket58.ts', mode: '100644', content: 'SECRET_MARKER' }
+  const reply = {
+    version: 1,
+    message: 'feat: implement ticket (#58)',
+    files: [file],
+    risk: 'SECRET_MARKER',
+    rollback: 'Revert',
+  }
+  for (const [change, diagnostic] of [
+    [
+      { message: 'feat: ' + 'SECRET_MARKER'.repeat(7) + ' (#58)' },
+      'result.message rule=max_length max=72',
+    ],
+    [{ message: 'feat: wrong ticket SECRET_MARKER (#57)' }, 'result.message rule=approved_ticket'],
+    [{ files: [] }, 'result.files rule=file_count min=1 max=200'],
+    [
+      { files: [{ ...file, path: 'docs/SECRET_MARKER.md' }] },
+      'result.files.path rule=protected_path index=0',
+    ],
+    [
+      { files: [{ ...file, path: 'frontend/src/api/Generated/SECRET_MARKER.ts' }] },
+      'result.files.path rule=generated_path index=0',
+    ],
+    [
+      { files: [{ ...file, path: 'GLOSSARY.md', content: null }] },
+      'result.files.content rule=document_deletion index=0',
+    ],
+    [
+      { files: [{ ...file, path: './GLOSSARY.md' }] },
+      'result.files.path rule=protected_path index=0',
+    ],
+  ]) {
+    writeFileSync(fakeReplies, JSON.stringify({ contract, result: { ...reply, ...change } }))
+    execute(
+      'final',
+      'phase=final ticket=58 operation=validate category=invalid_result field=' + diagnostic,
+    )
+  }
+  writeFileSync(fakeReplies, JSON.stringify({ contract }))
   const final = execute('final')
   assert.equal(final.ready, true)
   assert.equal(git('rev-parse', final.candidateSha + '^'), first.candidateSha)
   const integrations = JSON.parse(readFileSync(join(io, 'integrations.json')))
   assert.deepEqual(
     integrations.map((r) => r.label),
-    ['ticket-3', 'ticket-4', 'review-Standards'],
+    ['ticket-57', 'ticket-58', 'ticket-59', 'review-Standards'],
   )
-  assert.equal(integrations[2].base, integrations[1].sha)
-  assert.equal(integrations[2].conclusion, 'success')
+  assert.equal(integrations[3].base, integrations[2].sha)
+  assert.equal(integrations[3].conclusion, 'success')
   assert.equal(
-    git('show', final.candidateSha + ':frontend/src/ticket4.ts'),
-    'export const ticket4 = false',
+    git('show', final.candidateSha + ':frontend/src/ticket58.ts'),
+    'export const ticket58 = false',
   )
+  assert.match(git('show', 'HEAD:README.md'), /Отмена освобождает слот/)
   assert.equal(JSON.parse(readFileSync(join(io, 'verification.json'))).sha, final.candidateSha)
   assert.equal(git('status', '--porcelain'), '')
 
   context.expectedHead = final.candidateSha
-  for (const review of [
-    { findings: [{ path: 'frontend/src/ticket4.ts', line: 0 }], repair: {} },
-    { findings: [], repair: {} },
+  for (const [review, diagnostic] of [
+    [
+      {
+        findings: [
+          {
+            path: 'SECRET_MARKER',
+            line: 0,
+            conditions: 'SECRET_MARKER',
+            consequences: 'SECRET_MARKER',
+          },
+        ],
+        repair: {},
+      },
+      'review.findings.line rule=positive_integer index=0 min=1',
+    ],
+    [{ findings: [], repair: {} }, 'review.repair rule=matches_findings'],
+    [
+      {
+        findings: [
+          {
+            path: 'SECRET_MARKER',
+            line: 1,
+            conditions: 'SECRET_MARKER',
+            consequences: 'SECRET_MARKER',
+          },
+        ],
+        repair: { ...reply, files: [] },
+      },
+      'review.repair.files rule=file_count min=1 max=200',
+    ],
   ]) {
     const payload = JSON.stringify({ ...review, risk: 'UI', rollback: 'Revert code' })
     writeFileSync(fake, fixtureEvents + `\ntext(${JSON.stringify(payload)}); finish()`)
-    execute('final', 'phase=final ticket=none operation=validate category=invalid_result')
+    execute(
+      'final',
+      'phase=final axis=Standards operation=validate category=invalid_result field=' + diagnostic,
+    )
   }
   assert.equal(git('rev-parse', 'HEAD'), final.candidateSha)
 })

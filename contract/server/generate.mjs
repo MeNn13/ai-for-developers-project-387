@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -42,24 +43,22 @@ run(['patch-emitter.mjs'])
 const staging = join(root, 'artifacts/server-generation')
 rmSync(staging, { recursive: true, force: true })
 mkdirSync(staging, { recursive: true })
-copyFileSync(join(root, 'contract/main.tsp'), join(directory, 'main.tsp'))
-try {
-  run([
-    'node_modules/@typespec/compiler/cmd/tsp.js',
-    'compile',
-    'main.tsp',
-    '--emit',
-    '@typespec/http-server-csharp',
-    '--option',
-    '@typespec/http-server-csharp.output-type=models',
-    '--option',
-    '@typespec/http-server-csharp.skip-format=true',
-    '--output-dir',
-    staging,
-  ])
-} finally {
-  rmSync(join(directory, 'main.tsp'), { force: true })
-}
+const source = join(staging, 'main.tsp')
+copyFileSync(join(root, 'contract/main.tsp'), source)
+symlinkSync(join(directory, 'node_modules'), join(staging, 'node_modules'), 'junction')
+run([
+  'node_modules/@typespec/compiler/cmd/tsp.js',
+  'compile',
+  source,
+  '--emit',
+  '@typespec/http-server-csharp',
+  '--option',
+  '@typespec/http-server-csharp.output-type=models',
+  '--option',
+  '@typespec/http-server-csharp.skip-format=true',
+  '--output-dir',
+  staging,
+])
 const emitted = join(staging, '@typespec/http-server-csharp/generated')
 const selected = join(staging, 'selected')
 mkdirSync(selected)

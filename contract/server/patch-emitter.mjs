@@ -32,7 +32,8 @@ const patches = [
 // to recognize both the pristine and already-patched package, rejecting other edits.
 const outputs = patches.map(({ path, hash, changes }) => {
   const file = new URL(path, base)
-  let original = readFileSync(file, 'utf8')
+  const current = readFileSync(file, 'utf8')
+  let original = current
   for (const [before, after] of changes) original = original.replace(after, before)
   if (createHash('sha256').update(original).digest('hex') !== hash) {
     throw new Error(
@@ -41,7 +42,8 @@ const outputs = patches.map(({ path, hash, changes }) => {
   }
   let patched = original
   for (const [before, after] of changes) patched = patched.replace(before, after)
-  return [file, patched]
+  return { file, current, patched }
 })
-for (const [file, source] of outputs) writeFileSync(file, source)
+for (const { file, current, patched } of outputs)
+  if (current !== patched) writeFileSync(file, patched)
 console.log('Verified alpha.32 project patch: required, nullable, DateOnly')

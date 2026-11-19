@@ -5,6 +5,8 @@ import {
   writeFileSync,
   mkdirSync,
   mkdtempSync,
+  statSync,
+  utimesSync,
   cpSync,
   symlinkSync,
   rmSync,
@@ -33,8 +35,11 @@ test('generation restores stale outputs and check detects drift without modifyin
     'junction',
   )
   const generated = resolve(fixture, 'backend/BookingCalendar.Api/Generated')
+  const localContract = resolve(fixture, 'contract/server/main.tsp')
+  writeFileSync(localContract, '// unrelated local file\n')
   const first = run(fixture)
   assert.equal(first.status, 0, first.stdout + first.stderr)
+  assert.equal(readFileSync(localContract, 'utf8'), '// unrelated local file\n')
   assert.equal(run(fixture, '--check').status, 0)
   const health = resolve(generated, 'Models/HealthResponse.cs')
   writeFileSync(health, '// stale\n')
@@ -71,7 +76,11 @@ test('patch accepts repeated application but refuses an incompatible version or 
   const patch = () =>
     spawnSync(process.execPath, [resolve(server, 'patch-emitter.mjs')], { encoding: 'utf8' })
   assert.equal(patch().status, 0)
+  const source = resolve(emitter, 'dist/src/components/models/models.js')
+  utimesSync(source, 1_000_000, 1_000_000)
+  const patchedMtime = statSync(source).mtimeMs
   assert.equal(patch().status, 0)
+  assert.equal(statSync(source).mtimeMs, patchedMtime)
   const manifestPath = resolve(emitter, 'package.json')
   const manifest = readFileSync(manifestPath, 'utf8')
   writeFileSync(manifestPath, JSON.stringify({ version: '0.58.0-alpha.33' }))
@@ -79,7 +88,6 @@ test('patch accepts repeated application but refuses an incompatible version or 
   assert.notEqual(version.status, 0)
   assert.match(version.stderr, /only supports 0.58.0-alpha.32/)
   writeFileSync(manifestPath, manifest)
-  const source = resolve(emitter, 'dist/src/components/models/models.js')
   writeFileSync(source, readFileSync(source, 'utf8') + '\n// incompatible edit\n')
   const corrupted = patch()
   assert.notEqual(corrupted.status, 0)

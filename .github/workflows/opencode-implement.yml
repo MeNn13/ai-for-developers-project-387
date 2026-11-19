@@ -104,6 +104,7 @@ jobs:
           mise trust "$INITIAL_CANDIDATE_ROOT/mise.toml"
           cd "$INITIAL_CANDIDATE_ROOT"
           mise run install
+          mise exec -- npx playwright install --with-deps --only-shell chromium
       - name: Install pinned read-only model and isolation
         shell: bash
         run: |
@@ -130,7 +131,9 @@ jobs:
         env:
           GRAPH_DIAGNOSTIC: ${{ steps.graph.outputs.diagnostic }}
         run: |
-          echo "::error::${GRAPH_DIAGNOSTIC:-Graph diagnostic unavailable}"
+          diagnostic="${GRAPH_DIAGNOSTIC:-Graph diagnostic unavailable}"
+          printf '::error::%s\n' "$diagnostic"
+          printf '%s\n' "$diagnostic" >> "$GITHUB_STEP_SUMMARY"
           exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -260,6 +263,7 @@ jobs:
           mise trust "$INITIAL_CANDIDATE_ROOT/mise.toml"
           cd "$INITIAL_CANDIDATE_ROOT"
           mise run install
+          mise exec -- npx playwright install --with-deps --only-shell chromium
       - name: Install pinned read-only model and isolation
         shell: bash
         run: |
@@ -286,7 +290,9 @@ jobs:
         env:
           GRAPH_DIAGNOSTIC: ${{ steps.graph.outputs.diagnostic }}
         run: |
-          echo "::error::${GRAPH_DIAGNOSTIC:-Graph diagnostic unavailable}"
+          diagnostic="${GRAPH_DIAGNOSTIC:-Graph diagnostic unavailable}"
+          printf '::error::%s\n' "$diagnostic"
+          printf '%s\n' "$diagnostic" >> "$GITHUB_STEP_SUMMARY"
           exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

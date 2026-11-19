@@ -5,50 +5,21 @@ import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { decodeModel, ImplementationFailure } from './implementation-model-output.mjs'
-import { validateRepair } from './implementation-repair.mjs'
+import {
+  InvalidResult,
+  resultInstructions,
+  validateChanges,
+  validateExistingDocuments,
+  validateReview,
+} from './implementation-result.mjs'
 
 const phase = ['first', 'final'].includes(process.argv[2]) ? process.argv[2] : 'unknown'
 let activeTicket = 'none'
+let reviewAxis
 let operation = 'preflight'
 const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
 const requireValue = (ok) => {
   if (!ok) throw new Error('initial_graph_failed')
-}
-const hasFields = (value, fields) =>
-  value &&
-  typeof value === 'object' &&
-  Object.keys(value).length === fields.length &&
-  fields.every((field) => Object.hasOwn(value, field))
-const nonempty = (value) => typeof value === 'string' && value.trim().length > 0
-
-function validateImplementation(reply, context) {
-  requireValue(
-    hasFields(reply, ['version', 'message', 'files', 'risk', 'rollback']) &&
-      Array.isArray(reply.files) &&
-      reply.files.every((file) => hasFields(file, ['path', 'mode', 'content'])) &&
-      nonempty(reply.risk) &&
-      nonempty(reply.rollback),
-  )
-  return validateRepair(reply, context)
-}
-
-function validateReview(review) {
-  requireValue(
-    hasFields(review, ['findings', 'risk', 'rollback', 'repair']) &&
-      Array.isArray(review.findings) &&
-      review.findings.every(
-        (finding) =>
-          hasFields(finding, ['path', 'line', 'conditions', 'consequences']) &&
-          nonempty(finding.path) &&
-          Number.isSafeInteger(finding.line) &&
-          finding.line > 0 &&
-          nonempty(finding.conditions) &&
-          nonempty(finding.consequences),
-      ) &&
-      nonempty(review.risk) &&
-      nonempty(review.rollback) &&
-      (review.findings.length ? review.repair !== null : review.repair === null),
-  )
 }
 const trustedRoot = resolve(import.meta.dirname, '..')
 const root = process.env.INITIAL_CANDIDATE_ROOT
@@ -112,7 +83,8 @@ function model(context, instruction) {
       input:
         instruction +
         '\nThe final assistant message must contain one complete JSON object, with no Markdown fences or surrounding prose.' +
-        '\nIf the contract changes, include the updated contract/main.tsp in files. The controller generates OpenAPI, the TypeScript client, and C# DTOs from it. Omit those generated files from the reply.' +
+        '\n' +
+        resultInstructions(context.activeTicket?.number ?? context.tickets.at(-1)) +
         '\nUNTRUSTED APPROVED CONTEXT:\n' +
         JSON.stringify(context),
       timeout: remaining(context),
@@ -132,9 +104,15 @@ async function integrate(context, reply, label) {
   await mkdir(step, { recursive: true })
   await writeFile(`${step}/context.json`, JSON.stringify(stepContext))
   operation = 'validate'
-  const validated = validateImplementation(reply, stepContext)
+  const field = reviewAxis ? 'review.repair' : 'result'
+  validateChanges(reply, stepContext.tickets, field)
+  validateExistingDocuments(
+    reply.files,
+    (path) => git(['ls-tree', base, '--', path]).startsWith('100644 blob '),
+    field,
+  )
   operation = 'apply'
-  await writeFile(`${step}/reply.json`, JSON.stringify(validated))
+  await writeFile(`${step}/reply.json`, JSON.stringify(reply))
   command(
     process.execPath,
     [resolve(trustedRoot, 'scripts/implementation-repair.mjs'), 'candidate'],
@@ -197,7 +175,7 @@ async function main() {
       operation = 'model'
       const reply = model(
         { ...context, activeTicket: ticket, integrations: history },
-        'Apply implement-spec and tdd at approved seams. Implement ONLY activeTicket. Read AGENTS and applicable docs. Shell, writes, network and delegated tools are prohibited. Return JSON {version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}. English Conventional Commit references active ticket. Explain risk by consequences and data rollback sufficiency. No repeated attempts.',
+        'Apply implement-spec and tdd at approved seams. Implement ONLY activeTicket. Read AGENTS and applicable docs. Shell, writes, network and delegated tools are prohibited. Return the change object below with the active ticket number. Explain risk by consequences and data rollback sufficiency. No repeated attempts.',
       )
       const record = await integrate(
         { ...context, tickets: [ticket.number] },
@@ -213,6 +191,7 @@ async function main() {
   await write('integrations', records)
   if (!first) {
     for (const axis of ['Standards', 'Spec']) {
+      reviewAxis = axis
       // The read-only CLI cannot run Git. Supply the actual base-to-head change
       // as data, refreshing it after any repair by the preceding review session.
       operation = axis === 'Standards' ? 'review_standards' : 'review_spec'
@@ -231,7 +210,7 @@ async function main() {
       }
       const review = model(
         { ...context, integrations: records, review: reviewContext },
-        `Perform independent ${axis} review of entire integrated graph against base ${context.base}. Read changes and approved context. Return JSON {findings:[{path,line,conditions,consequences}],risk,rollback,repair:null|{version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}}. Each finding has a positive integer line. Include a repair if findings is nonempty; otherwise use repair:null. Summarize consequences and risk of ENTIRE change; explain whether reverting code suffices for data. Provide only confirmed defects. No writes or shell. Review is separate from external GitHub author review.`,
+        `Perform independent ${axis} review of entire integrated graph against base ${context.base}. Read changes and approved context. Return exactly {findings:[{path,line,conditions,consequences}],risk,rollback,repair}. Use those exact finding keys, a positive integer line, and nonblank strings. If findings is nonempty, repair must be a change object as described below for a ticket in scope. Otherwise use repair:null. Summarize consequences and risk of ENTIRE change; explain whether reverting code suffices for data. Provide only confirmed defects. No writes or shell. Review is separate from external GitHub author review.`,
       )
       operation = 'validate'
       validateReview(review)
@@ -242,6 +221,7 @@ async function main() {
       operation = 'record'
       await write(`review-${axis}`, review)
     }
+    reviewAxis = undefined
   }
   // Preserve the per-ticket commits locally; publish one deterministic phase commit.
   operation = 'assemble'
@@ -312,7 +292,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
       error instanceof ImplementationFailure && error.status !== undefined
         ? ` status=${error.status}`
         : ''
-    const diagnostic = `${prefix} phase=${phase} ticket=${activeTicket} operation=${operation} category=${category}${status}`
+    const target = reviewAxis ? `axis=${reviewAxis}` : `ticket=${activeTicket}`
+    const violation = error instanceof InvalidResult ? ` ${error.message}` : ''
+    const diagnostic = `${prefix} phase=${phase} ${target} operation=${operation} category=${category}${status}${violation}`
     console.error(diagnostic)
     if (process.env.GITHUB_OUTPUT)
       await appendFile(

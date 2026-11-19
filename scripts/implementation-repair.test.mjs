@@ -76,7 +76,7 @@ test('publisher recovery downloads only one exact checkpoint from the current ru
   assert.match(publisher, /RECOVERY_ARTIFACT_ID: \$\{\{ steps.recovery.outputs.artifact \}\}/)
   assert.ok(publisher.indexOf('Locate current run') < publisher.indexOf('Mint repository-scoped'))
 })
-test('repair model has no write token and emits bounded file data with draft readiness', (t) => {
+test('repair model has no write token and emits only the validated change object', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'repair-model-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   const cli = join(dir, 'fake.mjs')
@@ -129,15 +129,14 @@ test('repair model has no write token and emits bounded file data with draft rea
   )
   assert.equal(result.status, 0, result.stderr)
   const decoded = JSON.parse(readFileSync(join(dir, 'reply.json')))
-  assert.equal(decoded.ready, false)
-  assert.deepEqual(decoded.files, reply.files)
+  assert.deepEqual(decoded, reply)
   assert.throws(
     () =>
       validateRepair(
         { ...reply, files: [{ path: 'scripts/agent.mjs', mode: '100644', content: 'code' }] },
         { tickets: [41] },
       ),
-    /repair_input/,
+    /field=result.files.path rule=protected_path index=0/,
   )
 })
 test('independent completion reports cancellation, timeout, infra and limit without model or artifacts', async () => {
@@ -218,7 +217,7 @@ test('model cannot hand-edit generated artifacts', () => {
   ])
     assert.throws(
       () => validateRepair({ ...reply, files: [{ ...reply.files[0], path }] }, { tickets: [41] }),
-      /repair_input/,
+      /field=result.files.path rule=generated_path index=0/,
     )
 })
 

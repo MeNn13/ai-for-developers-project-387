@@ -12,20 +12,30 @@ function requireValue(condition, reason) {
 }
 
 // Deliberately narrow: new infrastructure and instructions require a human PR.
-export function allowedFile(file) {
-  const path = file.path
+export const existingDocument = (path) => path === 'GLOSSARY.md' || path === 'README.md'
+
+export function allowedPath(path) {
   return (
     typeof path === 'string' &&
     path.length < 240 &&
-    !path.split('/').some((p) => !p || p.startsWith('.') || /[\\:%\x00-\x20]/.test(p)) &&
+    !path
+      .split('/')
+      .some((p) => !p || p.startsWith('.') || p.endsWith('.') || /[\\:%\x00-\x20]/.test(p)) &&
     !/(?:agents?|skills?|instructions?|prompts?|review|config)/i.test(path) &&
     (/^backend\/(?:BookingCalendar\.[A-Za-z.]+)\/[A-Za-z0-9_./-]+\.cs$/.test(path) ||
       /^frontend\/src\/[A-Za-z0-9_./-]+\.(?:ts|tsx|css)$/.test(path) ||
       /^e2e\/[A-Za-z0-9_-]+\.spec\.ts$/.test(path) ||
+      existingDocument(path) ||
       path === 'contract/main.tsp' ||
-      path === 'contract/openapi/openapi.yaml') &&
+      path === 'contract/openapi/openapi.yaml')
+  )
+}
+
+export function allowedFile(file) {
+  return (
+    allowedPath(file?.path) &&
     file.mode === '100644' &&
-    (file.content === null || typeof file.content === 'string')
+    (typeof file.content === 'string' || (file.content === null && !existingDocument(file.path)))
   )
 }
 
@@ -174,7 +184,7 @@ export async function publishImplementation(
     requireValue(
       typeof result.message === 'string' &&
         result.message.length <= 72 &&
-        /^(feat|fix|chore|docs|test|refactor|ci|build|perf|revert|style)(\([a-z]+\))?!?: [a-z][\x20-\x7e]+ \(#\d+\)$/.test(
+        /^(feat|fix|chore|docs|test|refactor|ci|build|perf|revert|style)(\([a-z]+\))?!?: [a-z][\x20-\x7e]* \(#\d+\)$/.test(
           result.message,
         ) &&
         context.tickets.some((n) => result.message.endsWith(`(#${n})`)) &&
@@ -265,6 +275,19 @@ export async function publishImplementation(
     } else requireValue(!pr && context.expectedHead === context.base, 'stale_head')
     const parent = head?.object.sha ?? context.base
     const baseCommit = await api('GET', `/git/commits/${parent}`)
+    const documents = result.files.filter((file) => existingDocument(file.path))
+    if (documents.length) {
+      const { tree, truncated } = await api('GET', `/git/trees/${baseCommit.tree.sha}`)
+      requireValue(
+        truncated === false &&
+          documents.every(({ path }) =>
+            tree.some(
+              (entry) => entry.path === path && entry.type === 'blob' && entry.mode === '100644',
+            ),
+          ),
+        'protected_path',
+      )
+    }
     const tree = await api('POST', '/git/trees', {
       base_tree: baseCommit.tree.sha,
       tree: result.files.map((f) => ({
