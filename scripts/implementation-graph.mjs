@@ -19,6 +19,42 @@ const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex
 const requireValue = (ok) => {
   if (!ok) throw new Error('initial_graph_failed')
 }
+const hasFields = (value, fields) =>
+  value &&
+  typeof value === 'object' &&
+  Object.keys(value).length === fields.length &&
+  fields.every((field) => Object.hasOwn(value, field))
+const nonempty = (value) => typeof value === 'string' && value.trim().length > 0
+
+function validateImplementation(reply, context) {
+  requireValue(
+    hasFields(reply, ['version', 'message', 'files', 'risk', 'rollback']) &&
+      Array.isArray(reply.files) &&
+      reply.files.every((file) => hasFields(file, ['path', 'mode', 'content'])) &&
+      nonempty(reply.risk) &&
+      nonempty(reply.rollback),
+  )
+  return validateRepair(reply, context)
+}
+
+function validateReview(review) {
+  requireValue(
+    hasFields(review, ['findings', 'risk', 'rollback', 'repair']) &&
+      Array.isArray(review.findings) &&
+      review.findings.every(
+        (finding) =>
+          hasFields(finding, ['path', 'line', 'conditions', 'consequences']) &&
+          nonempty(finding.path) &&
+          Number.isSafeInteger(finding.line) &&
+          finding.line > 0 &&
+          nonempty(finding.conditions) &&
+          nonempty(finding.consequences),
+      ) &&
+      nonempty(review.risk) &&
+      nonempty(review.rollback) &&
+      (review.findings.length ? review.repair !== null : review.repair === null),
+  )
+}
 const trustedRoot = resolve(import.meta.dirname, '..')
 const root = process.env.INITIAL_CANDIDATE_ROOT
 const directory = process.env.INITIAL_IO
@@ -78,7 +114,11 @@ function model(context, instruction) {
     process.env.OPENCODE_BIN ?? 'opencode',
     ['run', '--standalone', '--format', 'json', '--agent', 'discussion', '--model', config.model],
     {
-      input: instruction + '\nUNTRUSTED APPROVED CONTEXT:\n' + JSON.stringify(context),
+      input:
+        instruction +
+        '\nThe final assistant message must contain one complete JSON object, with no Markdown fences or surrounding prose.' +
+        '\nUNTRUSTED APPROVED CONTEXT:\n' +
+        JSON.stringify(context),
       timeout: remaining(context),
       env: Object.fromEntries(
         Object.entries(process.env).filter(([key]) => !/TOKEN|PRIVATE_KEY/.test(key)),
@@ -88,31 +128,55 @@ function model(context, instruction) {
   )
 }
 function decodeModel(child, bounded) {
-  if (child.error?.code === 'ENOBUFS') throw new GraphFailure('decode_failed')
+  if (child.error?.code === 'ENOBUFS') throw new GraphFailure('model_output_limit')
   if (child.error || (bounded && [126, 127].includes(child.status)))
     throw new GraphFailure('model_launch')
-  let text = '',
-    finished = false
+  const messages = new Map()
+  let sessionID
   let malformed = false
   let unknownError = false
   for (const line of (child.stdout ?? '').split(/\r?\n/).filter(Boolean)) {
     try {
       const item = JSON.parse(line)
+      if (typeof item?.type !== 'string') throw new Error()
       if (item.type === 'error') {
-        if (['APIError', 'ProviderAuthError'].includes(item.error?.name)) {
-          const status = item.error.data?.statusCode
+        if (
+          ['APIError', 'ProviderAuthError'].includes(item.error?.name) ||
+          ['api', 'provider-auth'].includes(item.error?.type)
+        ) {
+          const status = item.error.status ?? item.error.data?.statusCode
           throw new GraphFailure(
             'provider_error',
             Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined,
           )
         }
         unknownError = true
+        continue
       }
+      if (!['step_start', 'step_finish', 'text', 'tool_use', 'reasoning'].includes(item.type))
+        throw new Error()
+      const { part } = item
+      sessionID ??= item.sessionID
+      if (
+        typeof sessionID !== 'string' ||
+        !sessionID ||
+        item.sessionID !== sessionID ||
+        part?.sessionID !== sessionID ||
+        typeof part.messageID !== 'string' ||
+        !part.messageID
+      )
+        throw new Error()
+      const message = messages.get(part.messageID) ?? { text: [], reason: undefined }
+      messages.set(part.messageID, message)
       if (item.type === 'text') {
-        if (typeof item.part?.text === 'string') text += item.part.text
-        else malformed = true
+        if (typeof part.text !== 'string') throw new Error()
+        // Reconciliation may emit more text for a message whose step already ended.
+        message.text.push(part.text)
       }
-      if (item.type === 'step_finish' && item.part.reason === 'stop') finished = true
+      if (item.type === 'step_finish') {
+        if (typeof part.reason !== 'string' || message.reason !== undefined) throw new Error()
+        message.reason = part.reason
+      }
     } catch (error) {
       if (error instanceof GraphFailure) throw error
       malformed = true
@@ -126,12 +190,14 @@ function decodeModel(child, bounded) {
         ? child.status
         : undefined,
     )
-  if (malformed) throw new GraphFailure('decode_failed')
-  if (!finished) throw new GraphFailure('incomplete_stream')
+  if (malformed) throw new GraphFailure('invalid_event_stream')
+  const final = [...messages.values()].at(-1)
+  if (final?.reason !== 'stop' || final.text.length === 0)
+    throw new GraphFailure('incomplete_stream')
   try {
-    return JSON.parse(text)
+    return JSON.parse(final.text.join(''))
   } catch {
-    throw new GraphFailure('decode_failed')
+    throw new GraphFailure('invalid_result_json')
   }
 }
 async function integrate(context, reply, label) {
@@ -143,7 +209,7 @@ async function integrate(context, reply, label) {
   await mkdir(step, { recursive: true })
   await writeFile(`${step}/context.json`, JSON.stringify(stepContext))
   operation = 'validate'
-  const validated = validateRepair(reply, stepContext)
+  const validated = validateImplementation(reply, stepContext)
   operation = 'apply'
   await writeFile(`${step}/reply.json`, JSON.stringify(validated))
   command(
@@ -208,9 +274,13 @@ async function main() {
       operation = 'model'
       const reply = model(
         { ...context, activeTicket: ticket, integrations: history },
-        'Apply implement-spec and tdd at approved seams. Implement ONLY activeTicket. Read AGENTS and applicable docs. Shell, writes, network and delegated tools are prohibited. Return JSON {version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}. English Conventional Commit references active ticket. Never emit generated files. Explain risk by consequences and data rollback sufficiency. No repeated attempts.',
+        'Apply implement-spec and tdd at approved seams. Implement ONLY activeTicket. Read AGENTS and applicable docs. Shell, writes, network and delegated tools are prohibited. Return JSON {version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}. English Conventional Commit references active ticket. Only supply source files; trusted generation handles changes to contract/main.tsp. Explain risk by consequences and data rollback sufficiency. No repeated attempts.',
       )
-      const record = await integrate(context, reply, `ticket-${ticket.number}`)
+      const record = await integrate(
+        { ...context, tickets: [ticket.number] },
+        reply,
+        `ticket-${ticket.number}`,
+      )
       activeTicket = 'none'
       operation = 'graph'
       return record
@@ -238,19 +308,12 @@ async function main() {
       }
       const review = model(
         { ...context, integrations: records, review: reviewContext },
-        `Perform independent ${axis} review of entire integrated graph against base ${context.base}. Read changes and approved context. Return JSON {findings:[{path,line,conditions,consequences}],risk,rollback,repair:null|{version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}}. Summarize consequences and risk of ENTIRE change; explain whether reverting code suffices for data. Provide only confirmed defects. No writes or shell. Review is separate from external GitHub author review.`,
+        `Perform independent ${axis} review of entire integrated graph against base ${context.base}. Read changes and approved context. Return JSON {findings:[{path,line,conditions,consequences}],risk,rollback,repair:null|{version:1,message,files:[{path,mode:"100644",content:string|null}],risk,rollback}}. Each finding has a positive integer line. Include a repair if findings is nonempty; otherwise use repair:null. Only supply source files in repairs. Summarize consequences and risk of ENTIRE change; explain whether reverting code suffices for data. Provide only confirmed defects. No writes or shell. Review is separate from external GitHub author review.`,
       )
       operation = 'validate'
-      requireValue(Array.isArray(review?.findings))
-      requireValue(
-        typeof review.risk === 'string' &&
-          review.risk.length > 0 &&
-          typeof review.rollback === 'string' &&
-          review.rollback.length > 0,
-      )
+      validateReview(review)
       summary = review
       if (review.findings.length) {
-        requireValue(review.repair)
         records.push(await integrate(context, review.repair, `review-${axis}`))
       }
       operation = 'record'
