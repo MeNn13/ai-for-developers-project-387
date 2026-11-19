@@ -64,7 +64,7 @@ jobs:
         if: steps.context.outputs.allowed == 'true'
         run: |
           node --input-type=module <<'NODE'
-          import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+          import { mkdir, readFile, writeFile } from 'node:fs/promises';
           import { join } from 'node:path';
           import { run } from './scripts/opencode.mjs';
           import { diagnosticFor } from './scripts/opencode-diagnostic.mjs';
@@ -78,8 +78,14 @@ jobs:
             });
             const { mode, repository, number, head } =
               JSON.parse(await readFile(join(directory, 'context.json'), 'utf8'));
+            const reply = JSON.parse(await readFile(join(directory, 'reply.json'), 'utf8'));
+            // The trusted base may predate the review-specific checks.
+            if (reply.publication !== null || reply.comment.includes(process.env.OPENCODE_API_KEY))
+              throw new Error('Review reply is not publishable.');
             await writeFile(join(publication, 'context.json'), JSON.stringify({ mode, repository, number, head }));
-            await rename(join(directory, 'reply.json'), join(publication, 'reply.json'));
+            await writeFile(join(publication, 'reply.json'), JSON.stringify({
+              version: reply.version, comment: reply.comment, publication: null,
+            }));
           } catch (error) {
             const diagnostic = diagnosticFor(error);
             console.error(JSON.stringify(diagnostic));

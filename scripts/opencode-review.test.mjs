@@ -144,7 +144,7 @@ test('fresh review submits and publishes one comment for the exact head of a dra
         if (!input.includes('independent PR review') || !input.includes('publication strictly null') ||
             !process.argv.includes('--standalone') || process.argv.includes('--continue') ||
             process.env.GH_TOKEN) process.exit(3);
-        const submission = { type: 'tool_use', sessionID: 'review', part: { id: 'reply', tool: 'submit_reply', state: { status: 'completed', input: { version: 1, comment: 'No confirmed defects', publication: null } }, messageID: 'r' } };
+        const submission = { type: 'tool_use', sessionID: 'review', part: { id: 'reply', tool: 'submit_reply', state: { status: 'completed', input: { version: 1, comment: 'No confirmed defects', publication: null, extra: 'private-provider-context' } }, messageID: 'r' } };
         const stop = { type: 'step_finish', sessionID: 'review', part: { reason: 'stop' } };
         await new Promise(() => process.stdout.write([submission, stop].map(JSON.stringify).join('\\n'), () => process.exit(0)));
       }
@@ -155,7 +155,7 @@ test('fresh review submits and publishes one comment for the exact head of a dra
       NODE_OPTIONS: `--import=${pathToFileURL(loader).href}`,
       OPENCODE_BIN: process.execPath,
       OPENCODE_IO: directory,
-      OPENCODE_API_KEY: 'fake',
+      OPENCODE_API_KEY: 'private-provider-context',
     }
     delete env.GH_TOKEN
     const result = spawnSync(
@@ -169,6 +169,7 @@ test('fresh review submits and publishes one comment for the exact head of a dra
     )
     assert.deepEqual(stagedContext, context)
     const reply = JSON.parse(await readFile(join(directory, 'publication', 'reply.json'), 'utf8'))
+    assert.equal(JSON.stringify(reply).includes('private-provider-context'), false)
     assert.deepEqual(reply, { version: 1, comment: 'No confirmed defects', publication: null })
 
     const app = { login: 'implement[bot]', id: 123 }
