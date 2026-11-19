@@ -150,6 +150,43 @@ test('prepared implementation creates an App draft PR without executing result c
   )
 })
 
+test('publisher independently permits edits only to existing regular root documents', async () => {
+  for (const path of ['GLOSSARY.md', 'README.md']) {
+    for (const [file, entry, accepted] of [
+      [{ path, content: 'Updated' }, { path, type: 'blob', mode: '100644' }, true],
+      [{ path, content: 'New' }, null, false],
+      [{ path, content: 'Updated' }, { path, type: 'blob', mode: '120000' }, false],
+      [{ path, content: null }, { path, type: 'blob', mode: '100644' }, false],
+      [{ path: './' + path, content: 'Alias' }, null, false],
+      [{ path: path.toLowerCase(), content: 'Alias' }, null, false],
+      [{ path: 'docs/' + path, content: 'Nested' }, null, false],
+      [{ path: 'AGENTS.md', content: 'Instructions' }, null, false],
+    ]) {
+      const f = fixture()
+      const patch = { ...result, files: [{ mode: '100644', ...file }] }
+      const verified = trust()
+      verified.verification.resultDigest = createHash('sha256')
+        .update(JSON.stringify(patch))
+        .digest('hex')
+      const api = (method, url, data) =>
+        url === `/git/trees/${sha}`
+          ? { tree: entry ? [entry] : [], truncated: false }
+          : f.api(method, url, data)
+      if (accepted) {
+        const receipt = await publishImplementation(patch, context, api, verified)
+        assert.equal(receipt.head, next)
+        assert.equal(f.calls.find((call) => call.path === '/git/trees').data.tree[0].path, path)
+      } else {
+        await assert.rejects(publishImplementation(patch, context, api, verified), /protected_path/)
+        assert.equal(
+          f.calls.some((call) => call.method === 'POST'),
+          false,
+        )
+      }
+    }
+  }
+})
+
 test('initial in-progress producer publishes first draft and requires final checked phase before ready', async () => {
   const f = fixture()
   const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
