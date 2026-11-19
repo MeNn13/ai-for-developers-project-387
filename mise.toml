@@ -26,7 +26,7 @@ ASPNETCORE_URLS = "http://127.0.0.1:5000"
 depends = ["install:dotnet", "install:web", "install:server"]
 
 [tasks."install:server"]
-run = "npm ci --prefix contract/server --ignore-scripts"
+run = ["npm ci --prefix contract/server --ignore-scripts", "node contract/server/patch-emitter.mjs"]
 
 [tasks."install:dotnet"]
 run = "dotnet restore backend/BookingCalendar.sln --locked-mode"

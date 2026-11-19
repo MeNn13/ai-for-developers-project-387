@@ -104,6 +104,7 @@ jobs:
           mise trust "$INITIAL_CANDIDATE_ROOT/mise.toml"
           cd "$INITIAL_CANDIDATE_ROOT"
           mise run install
+          mise exec -- npx playwright install --with-deps --only-shell chromium
       - name: Install pinned read-only model and isolation
         shell: bash
         run: |
@@ -262,6 +263,7 @@ jobs:
           mise trust "$INITIAL_CANDIDATE_ROOT/mise.toml"
           cd "$INITIAL_CANDIDATE_ROOT"
           mise run install
+          mise exec -- npx playwright install --with-deps --only-shell chromium
       - name: Install pinned read-only model and isolation
         shell: bash
         run: |
