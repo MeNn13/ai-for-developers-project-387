@@ -293,9 +293,60 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
     commitDate: '2026-11-15T00:00:00Z',
   }
   const fake = join(dir, 'model.mjs')
+  const fixtureEvents = `
+    const emit = (type, messageID, part) => console.log(JSON.stringify({
+      type, timestamp: 1, sessionID: 'ses_graph',
+      part: { sessionID: 'ses_graph', messageID, ...part },
+    }))
+    const text = (text, id = 'msg_final') => emit('text', id, { type: 'text', text })
+    const finish = (reason = 'stop', id = 'msg_final') =>
+      emit('step_finish', id, { type: 'step-finish', reason })
+  `
   writeFileSync(
     fake,
-    `import assert from 'node:assert/strict'; let input=''; for await (const c of process.stdin) input+=c; assert.equal(process.env.GH_TOKEN, undefined); assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY,undefined); const context=JSON.parse(input.split('UNTRUSTED APPROVED CONTEXT:\\n')[1]); const n=context.activeTicket?.number; if(!n){assert.equal(context.review.base,context.base);assert.equal(context.review.head,context.integrations.at(-1).sha);assert.ok(context.review.diff.includes('diff --git a/frontend/src/ticket3.ts'));assert.ok(context.review.diff.includes('diff --git a/frontend/src/ticket4.ts'));assert.ok(context.review.diff.includes('+export const ticket3 = true'));assert.ok(context.review.diff.includes('+export const ticket4 = true'));} const reply=n?{version:1,message:'feat: implement ticket (#'+n+')',files:[{path:'frontend/src/ticket'+n+'.ts',mode:'100644',content:'export const ticket'+n+' = true\\n'}],risk:'UI consequences',rollback:'Revert; no persistent data'}:{findings:[],risk:'Entire UI change',rollback:'Revert; no persistent data',repair:null}; console.log(JSON.stringify({type:'text',part:{text:JSON.stringify(reply)}}));console.log(JSON.stringify({type:'step_finish',part:{reason:'stop'}}));`,
+    `${fixtureEvents}
+    import assert from 'node:assert/strict'
+    let input = ''
+    for await (const chunk of process.stdin) input += chunk
+    assert.equal(process.env.GH_TOKEN, undefined)
+    assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY, undefined)
+    const context = JSON.parse(input.split('UNTRUSTED APPROVED CONTEXT:\\n')[1])
+    const n = context.activeTicket?.number
+    const standards = input.startsWith('Perform independent Standards review')
+    if (!n) {
+      assert.equal(context.review.base, context.base)
+      assert.equal(context.review.head, context.integrations.at(-1).sha)
+      for (const ticket of [3,4]) {
+        assert.ok(context.review.diff.includes('diff --git a/frontend/src/ticket' + ticket + '.ts'))
+        const expected = ticket === 4 && !standards ? 'false' : 'true'
+        assert.ok(context.review.diff.includes('+export const ticket' + ticket + ' = ' + expected))
+      }
+    }
+    const path = 'frontend/src/ticket4.ts'
+    const review = { findings: [], risk: 'Entire UI change', rollback: 'Revert; no persistent data', repair: null }
+    if (standards) {
+      review.findings.push({ path, line: 1, conditions: 'Flag is enabled', consequences: 'Fixture defaults to enabled' })
+      review.repair = {
+        version: 1, message: 'fix: disable the fixture flag (#4)',
+        files: [{path, mode: '100644', content: 'export const ticket4 = false\\n'}],
+        risk: 'Changes default flag', rollback: 'Revert; no persistent data',
+      }
+    }
+    const reply = n ? {
+      version: 1, message: 'feat: implement ticket (#' + n + ')',
+      files: [{path: 'frontend/src/ticket' + n + '.ts', mode: '100644', content: 'export const ticket' + n + ' = true\\n'}],
+      risk: 'UI consequences', rollback: 'Revert; no persistent data',
+    } : review
+    emit('step_start', 'msg_read', {type: 'step-start'})
+    text('I will read the instructions.', 'msg_read')
+    emit('tool_use', 'msg_read', {type: 'tool', tool: 'read', state: {status: 'completed'}})
+    finish('tool-calls', 'msg_read')
+    emit('step_start', 'msg_final', {type: 'step-start'})
+    const json = JSON.stringify(reply)
+    text(json.slice(0, 10))
+    finish()
+    text(json.slice(10))
+    `,
   )
   const preload = join(dir, 'adapter.mjs')
   // Only the external model and Linux check adapter are fake; Git and candidate construction run.
@@ -344,7 +395,7 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
   const successModel = readFileSync(fake)
   writeFileSync(
     fake,
-    `console.error('SECRET_MARKER'); console.log(JSON.stringify({type:'error',error:{name:'APIError',data:{message:'SECRET_MARKER',statusCode:429}}})); process.exitCode=1`,
+    `console.error('SECRET_MARKER'); console.log(JSON.stringify({type:'error',error:{type:'api',message:'SECRET_MARKER',status:429}})); process.exitCode=1`,
   )
   execute('first', 'phase=first ticket=3 operation=model category=provider_error status=429')
   writeFileSync(fake, successModel)
@@ -357,32 +408,63 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
       "console.error('SECRET_MARKER'); process.exitCode=7",
       'operation=model category=model_exit status=7',
     ],
-    ["console.log('{}')", 'operation=model category=incomplete_stream'],
-    ["console.log('SECRET_MARKER')", 'operation=model category=decode_failed'],
+    ['', 'operation=model category=incomplete_stream'],
+    ["text('{}'); finish('length')", 'operation=model category=incomplete_stream'],
+    [
+      "text('{}'); finish(); text('SECRET_MARKER','msg_unfinished')",
+      'operation=model category=incomplete_stream',
+    ],
+    ["console.log('{}')", 'operation=model category=invalid_event_stream'],
+    ["console.log('SECRET_MARKER')", 'operation=model category=invalid_event_stream'],
+    ["text('{'); finish()", 'operation=model category=invalid_result_json'],
+    ["text('{}'); finish(); text('SECRET_MARKER')", 'operation=model category=invalid_result_json'],
+    [
+      "text('SECRET_MARKER'.repeat(200000)); finish()",
+      'operation=model category=model_output_limit',
+    ],
     [
       `console.log(JSON.stringify({type:'error',error:{name:'SECRET_MARKER'}}))`,
       'operation=model category=unknown',
     ],
+    ["text('{}'); finish()", 'operation=validate category=invalid_result'],
     [
-      `console.log(JSON.stringify({type:'text',part:{text:'{}'}})); console.log(JSON.stringify({type:'step_finish',part:{reason:'stop'}}))`,
+      `text(JSON.stringify({
+        version: 1, message: 'feat: implement another ticket (#3)',
+        files: [{path:'frontend/src/ticket4.ts',mode:'100644',content:'export const ticket4 = true'}],
+        risk: 'UI consequences', rollback: 'No persistent data',
+      })); finish()`,
       'operation=validate category=invalid_result',
     ],
   ]) {
-    writeFileSync(fake, script)
+    writeFileSync(fake, fixtureEvents + '\n' + script)
     execute('final', 'phase=final ticket=4 ' + diagnostic)
   }
   writeFileSync(fake, successModel)
   const final = execute('final')
   assert.equal(final.ready, true)
   assert.equal(git('rev-parse', final.candidateSha + '^'), first.candidateSha)
+  const integrations = JSON.parse(readFileSync(join(io, 'integrations.json')))
   assert.deepEqual(
-    JSON.parse(readFileSync(join(io, 'integrations.json'))).map((r) => r.ticket),
-    [3, 4],
+    integrations.map((r) => r.label),
+    ['ticket-3', 'ticket-4', 'review-Standards'],
   )
+  assert.equal(integrations[2].base, integrations[1].sha)
+  assert.equal(integrations[2].conclusion, 'success')
   assert.equal(
     git('show', final.candidateSha + ':frontend/src/ticket4.ts'),
-    'export const ticket4 = true',
+    'export const ticket4 = false',
   )
   assert.equal(JSON.parse(readFileSync(join(io, 'verification.json'))).sha, final.candidateSha)
   assert.equal(git('status', '--porcelain'), '')
+
+  context.expectedHead = final.candidateSha
+  for (const review of [
+    { findings: [{ path: 'frontend/src/ticket4.ts', line: 0 }], repair: {} },
+    { findings: [], repair: {} },
+  ]) {
+    const payload = JSON.stringify({ ...review, risk: 'UI', rollback: 'Revert code' })
+    writeFileSync(fake, fixtureEvents + `\ntext(${JSON.stringify(payload)}); finish()`)
+    execute('final', 'phase=final ticket=none operation=validate category=invalid_result')
+  }
+  assert.equal(git('rev-parse', 'HEAD'), final.candidateSha)
 })
