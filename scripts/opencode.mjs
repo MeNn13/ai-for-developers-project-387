@@ -218,6 +218,7 @@ function resultText(stream, { requireText = true, onEvent = () => {} } = {}) {
 export function resultReply(stream) {
   let reply
   let sessionID
+  let toolEvents = 0
   const calls = new Map()
   resultText(stream, {
     requireText: false,
@@ -226,12 +227,9 @@ export function resultReply(stream) {
         if (sessionID && sessionID !== event.sessionID) throw new DiagnosticError('stream_json')
         sessionID = event.sessionID
       }
-      if (
-        event.type !== 'tool_use' ||
-        event.part?.tool !== 'submit_reply' ||
-        event.part.state?.status !== 'completed'
-      )
-        return
+      if (event.type !== 'tool_use' || event.part?.tool !== 'submit_reply') return
+      toolEvents++
+      if (event.part.state?.status !== 'completed') return
       const { part } = event
       if (
         ![event.sessionID, part.messageID, part.id].every(
@@ -249,7 +247,10 @@ export function resultReply(stream) {
       reply ??= part.state.input
     },
   })
-  if (!reply) throw new DiagnosticError('submission_missing')
+  if (!reply)
+    throw new DiagnosticError(toolEvents ? 'submission_unfinished' : 'submission_missing', {
+      toolEvents,
+    })
   return reply
 }
 
@@ -267,20 +268,21 @@ function validateSubmittedReply(reply) {
 
 export async function run(directory, options = {}) {
   await rm(join(directory, 'reply.json'), { force: true })
-  if (!process.env.OPENCODE_API_KEY) throw new DiagnosticError('configuration')
-  let context, prompt, automatic
+  const apiKey = process.env.OPENCODE_API_KEY
+  if (!apiKey) throw new DiagnosticError('configuration')
+  let context, prompt, mode
   try {
     context = await readFile(join(directory, 'context.json'), 'utf8')
-    automatic = JSON.parse(context).mode === 'triage'
+    mode = JSON.parse(context).mode
     prompt = await readFile(
       options.prompt ??
-        (automatic ? '.github/opencode/triage-prompt.txt' : '.github/opencode/prompt.txt'),
+        (mode === 'triage' ? '.github/opencode/triage-prompt.txt' : '.github/opencode/prompt.txt'),
       'utf8',
     )
   } catch {
     throw new DiagnosticError('file_read')
   }
-  if (!automatic) prompt += `\n\n${protocolInstruction()}`
+  if (mode !== 'triage') prompt += `\n\n${protocolInstruction()}`
   const child = spawn(
     process.env.OPENCODE_BIN ?? 'opencode',
     [
@@ -328,12 +330,20 @@ export async function run(directory, options = {}) {
     throw new DiagnosticError('cli_exit', { exitCode: status })
   }
   let reply
-  if (automatic) {
+  if (mode === 'triage') {
     const comment = resultText(stream).trim()
     if (comment.length > 50_000) throw new DiagnosticError('stream_limit')
     reply = { version: 1, comment, publication: null }
   } else {
     reply = resultReply(stream)
+    if (mode === 'review' && reply.publication !== null)
+      throw new DiagnosticError('reply_schema', {
+        rule: 'publication_kind',
+        field: 'publication',
+        reason: reply.publication === undefined ? 'missing' : 'invalid',
+      })
+    if (mode === 'review' && reply.comment.includes(apiKey))
+      throw new DiagnosticError('reply_sensitive')
   }
   try {
     await writeFile(join(directory, 'reply.json'), JSON.stringify(reply))

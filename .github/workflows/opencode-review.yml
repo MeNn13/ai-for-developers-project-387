@@ -64,20 +64,27 @@ jobs:
         if: steps.context.outputs.allowed == 'true'
         run: |
           node --input-type=module <<'NODE'
-          import { writeFile } from 'node:fs/promises';
+          import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
           import { join } from 'node:path';
           import { run } from './scripts/opencode.mjs';
           import { diagnosticFor } from './scripts/opencode-diagnostic.mjs';
+          const directory = process.env.OPENCODE_IO;
+          const publication = join(directory, 'publication');
           try {
-            await run(process.env.OPENCODE_IO, {
+            await mkdir(publication, { recursive: true });
+            await run(directory, {
               prompt: '.github/opencode/review-prompt.txt',
               title: 'Independent PR review',
             });
+            const { mode, repository, number, head } =
+              JSON.parse(await readFile(join(directory, 'context.json'), 'utf8'));
+            await writeFile(join(publication, 'context.json'), JSON.stringify({ mode, repository, number, head }));
+            await rename(join(directory, 'reply.json'), join(publication, 'reply.json'));
           } catch (error) {
             const diagnostic = diagnosticFor(error);
             console.error(JSON.stringify(diagnostic));
             try {
-              await writeFile(join(process.env.OPENCODE_IO, 'diagnostic.json'), JSON.stringify(diagnostic));
+              await writeFile(join(publication, 'diagnostic.json'), JSON.stringify(diagnostic));
             } catch {
               console.error('Could not save safe review diagnostic.');
             }
@@ -91,7 +98,7 @@ jobs:
         if: always() && !cancelled() && steps.context.outputs.allowed == 'true'
         with:
           name: independent-review
-          path: ${{ runner.temp }}/review/*.json
+          path: ${{ runner.temp }}/review/publication/*.json
           retention-days: 1
 
   publish:

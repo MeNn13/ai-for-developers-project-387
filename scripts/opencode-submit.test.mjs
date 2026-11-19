@@ -56,6 +56,7 @@ async function invoke(events, { status = 0, stale = false, mode, rawStream } = {
       `
       import { readFileSync } from 'node:fs';
       if (process.argv[1]?.endsWith('run')) {
+        process.stderr.write('fake-private-key');
         process.stdin.resume();
         await new Promise(() => process.stdin.on('end', () => {
           process.stdout.write(readFileSync(new URL('./stream.jsonl', import.meta.url)), () => process.exit(${status}));
@@ -178,6 +179,56 @@ test('failed tool arguments can be corrected within the same session', async () 
   assert.deepEqual(result.reply, reply)
 })
 
+test('review diagnostics distinguish missing, unfinished and rejected submissions', async () => {
+  for (const [events, diagnostic] of [
+    [
+      [{ type: 'text', part: { messageID: 'last', text: 'fake-private-key' } }, stop],
+      { version: 6, code: 'submission_missing', stage: 'reply', details: { toolEvents: 0 } },
+    ],
+    [
+      [
+        submission({ comment: 'fake-private-key' }, 'pending', 'running'),
+        submission({ comment: 'fake-private-key' }, 'failed', 'error'),
+        stop,
+      ],
+      { version: 6, code: 'submission_unfinished', stage: 'reply', details: { toolEvents: 2 } },
+    ],
+    [
+      [submission({ version: 1, comment: 'fake-private-key' }), stop],
+      {
+        version: 3,
+        code: 'reply_schema',
+        stage: 'reply',
+        details: { rule: 'publication_kind', field: 'publication', reason: 'missing' },
+      },
+    ],
+    [
+      [submission({ ...protocolExamples[1], comment: 'fake-private-key' }), stop],
+      {
+        version: 3,
+        code: 'reply_schema',
+        stage: 'reply',
+        details: { rule: 'publication_kind', field: 'publication', reason: 'invalid' },
+      },
+    ],
+  ]) {
+    const result = await invoke(events, { mode: 'review', stale: true })
+    assert.equal(result.status, 1)
+    assert.equal(result.reply, null)
+    assert.deepEqual(result.diagnostic, diagnostic)
+  }
+})
+
+test('review rejects a submitted comment containing the configured key', async () => {
+  const result = await invoke([submission({ ...reply, comment: 'fake-private-key' }), stop], {
+    mode: 'review',
+    stale: true,
+  })
+  assert.equal(result.status, 1)
+  assert.equal(result.reply, null)
+  assert.deepEqual(result.diagnostic, { version: 1, code: 'reply_sensitive', stage: 'reply' })
+})
+
 test('duplicate events and identical submissions preserve the first result regardless of property order', async () => {
   const reordered = { publication: null, comment: reply.comment, version: 1 }
   const result = await invoke([submission(), submission(), submission(reordered, 'call-2'), stop])
@@ -191,7 +242,7 @@ test('conflicting, missing, malformed or incomplete submissions never leave a pu
       [{ type: 'text', part: { messageID: 'last', text: JSON.stringify(reply) } }, stop],
       'submission_missing',
     ],
-    [[submission({}, 'bad', 'error'), stop], 'submission_missing'],
+    [[submission({}, 'bad', 'error'), stop], 'submission_unfinished'],
     [
       [submission(), submission({ ...reply, comment: 'different' }, 'call-2'), stop],
       'submission_conflict',
