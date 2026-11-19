@@ -1,5 +1,6 @@
 const categories = {
   submission_missing: ['reply', 'Модель не передала результат через submit_reply.'],
+  submission_unfinished: ['reply', 'События submit_reply не содержат успешного завершения.'],
   submission_conflict: ['reply', 'Модель передала разные результаты через submit_reply.'],
   cli_start: ['cli', 'Не удалось запустить OpenCode CLI.'],
   cli_exit: ['cli', 'OpenCode CLI завершился с ошибкой.'],
@@ -12,6 +13,7 @@ const categories = {
   incomplete: ['stream', 'OpenCode не вернул завершённый ответ.'],
   reply_json: ['reply', 'Итоговый ответ модели не является JSON или единственным блоком JSON.'],
   reply_schema: ['reply', 'Итоговый ответ модели не соответствует схеме публикации.'],
+  reply_sensitive: ['reply', 'Комментарий ревью содержит настроенный ключ.'],
   file_read: ['files', 'Не удалось прочитать входные файлы.'],
   file_write: ['files', 'Не удалось записать результат подготовки.'],
   configuration: ['configuration', 'Не задана необходимая конфигурация OpenCode.'],
@@ -23,6 +25,8 @@ export class DiagnosticError extends Error {
   constructor(code, details) {
     super(code)
     this.diagnostic = { version: 1, code, stage: categories[code][0] }
+    if (['submission_missing', 'submission_unfinished'].includes(code))
+      this.diagnostic = { version: 6, code, stage: 'reply', details }
     if (['model_unavailable', 'cli_exit'].includes(code) && Number.isInteger(details?.exitCode))
       this.diagnostic = { ...this.diagnostic, version: 5, exitCode: details.exitCode }
     if (['reply_json', 'reply_schema'].includes(code) && details !== undefined)
@@ -79,6 +83,14 @@ function validDiagnostic(value) {
       Number.isInteger(value.exitCode) &&
       value.exitCode > 0 &&
       value.exitCode <= 255
+    )
+  if (value.version === 6)
+    return (
+      ['submission_missing', 'submission_unfinished'].includes(value.code) &&
+      exactKeys(value, 'version,code,stage,details') &&
+      exactKeys(value.details, 'toolEvents') &&
+      bounded(value.details.toolEvents) &&
+      (value.details.toolEvents === 0) === (value.code === 'submission_missing')
     )
   if (value.version === 1) return exactKeys(value, 'version,code,stage')
   if (value.version === 4) {

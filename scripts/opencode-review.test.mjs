@@ -7,19 +7,26 @@ import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { eligible, prepareReview, publishReview } from './opencode-review.mjs'
 
-test('workflow preserves a safe failed-review diagnostic without executing PR code', async () => {
-  const workflow = await readFile('.github/workflows/opencode-review.yml', 'utf8')
+function reviewStepSource(workflow) {
   const match = workflow.match(
     /node --input-type=module <<'NODE'\r?\n([\s\S]*?)\r?\n          NODE/,
   )
   assert.ok(match, 'review run must preserve the trusted runner diagnostic')
-  const source = match[1]
+  return match[1]
     .split(/\r?\n/)
     .map((line) => line.slice(10))
     .join('\n')
+}
+
+test('workflow preserves a safe failed-review diagnostic without executing PR code', async () => {
+  const workflow = await readFile('.github/workflows/opencode-review.yml', 'utf8')
+  const source = reviewStepSource(workflow)
   const directory = await mkdtemp(join(tmpdir(), 'review-diagnostic-'))
   try {
-    await writeFile(join(directory, 'context.json'), JSON.stringify({ mode: 'review' }))
+    await writeFile(
+      join(directory, 'context.json'),
+      JSON.stringify({ mode: 'review', diff: 'private-provider-context' }),
+    )
     const loader = join(directory, 'loader.mjs')
     await writeFile(
       loader,
@@ -43,12 +50,15 @@ test('workflow preserves a safe failed-review diagnostic without executing PR co
     })
     assert.equal(result.status, 1)
     assert.doesNotMatch(result.stdout + result.stderr, /private-provider-context/)
-    assert.deepEqual(JSON.parse(await readFile(join(directory, 'diagnostic.json'), 'utf8')), {
-      version: 1,
-      code: 'provider_rate',
-      stage: 'provider',
-    })
+    assert.deepEqual(
+      JSON.parse(await readFile(join(directory, 'publication', 'diagnostic.json'), 'utf8')),
+      { version: 1, code: 'provider_rate', stage: 'provider' },
+    )
     await assert.rejects(readFile(join(directory, 'reply.json')), { code: 'ENOENT' })
+    await assert.rejects(readFile(join(directory, 'publication', 'context.json')), {
+      code: 'ENOENT',
+    })
+    assert.match(workflow, /path: \$\{\{ runner.temp \}\}\/review\/publication\/\*\.json/)
     assert.match(
       workflow,
       /if: always\(\) && !cancelled\(\) && steps.context.outputs.allowed == 'true'/,
@@ -116,12 +126,14 @@ const pr = {
   body: 'Spec #38',
   title: 'Change',
 }
-test('review starts a fresh CLI session with independent instructions and no publication', async () => {
+test('fresh review submits and publishes one comment for the exact head of a draft App PR', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'independent-review-'))
   try {
+    const workflow = await readFile('.github/workflows/opencode-review.yml', 'utf8')
+    const context = { mode: 'review', repository: 'o/r', number: 9, head: 'abc' }
     await writeFile(
       join(directory, 'context.json'),
-      JSON.stringify({ mode: 'review', head: 'abc' }),
+      JSON.stringify({ ...context, diff: 'private-provider-context' }),
     )
     const loader = join(directory, 'loader.mjs')
     await writeFile(
@@ -130,11 +142,13 @@ test('review starts a fresh CLI session with independent instructions and no pub
       if (process.argv[1]?.endsWith('run')) {
         let input = ''; for await (const part of process.stdin) input += part;
         if (!input.includes('independent PR review') || !input.includes('publication strictly null') ||
+            !input.includes('publication must be explicitly null.') ||
+            input.includes('publication may be absent') || input.includes('publication.kind must be spec or tickets') ||
             !process.argv.includes('--standalone') || process.argv.includes('--continue') ||
             process.env.GH_TOKEN) process.exit(3);
-        console.log(JSON.stringify({ type: 'tool_use', sessionID: 'review', part: { id: 'reply', tool: 'submit_reply', state: { status: 'completed', input: { version: 1, comment: 'No confirmed defects', publication: null } }, messageID: 'r' } }));
-        console.log(JSON.stringify({ type: 'step_finish', part: { reason: 'stop' } }));
-        process.exit(0);
+        const submission = { type: 'tool_use', sessionID: 'review', part: { id: 'reply', tool: 'submit_reply', state: { status: 'completed', input: { version: 1, comment: 'No confirmed defects', publication: null, extra: 'private-provider-context' } }, messageID: 'r' } };
+        const stop = { type: 'step_finish', sessionID: 'review', part: { reason: 'stop' } };
+        await new Promise(() => process.stdout.write([submission, stop].map(JSON.stringify).join('\\n'), () => process.exit(0)));
       }
     `,
     )
@@ -143,18 +157,37 @@ test('review starts a fresh CLI session with independent instructions and no pub
       NODE_OPTIONS: `--import=${pathToFileURL(loader).href}`,
       OPENCODE_BIN: process.execPath,
       OPENCODE_IO: directory,
-      OPENCODE_API_KEY: 'fake',
+      OPENCODE_API_KEY: 'private-provider-context',
     }
     delete env.GH_TOKEN
-    const result = spawnSync(process.execPath, ['scripts/opencode-review.mjs', 'run'], {
-      env,
-      encoding: 'utf8',
-    })
-    assert.equal(result.status, 0, result.stderr)
-    assert.equal(
-      JSON.parse(await readFile(join(directory, 'reply.json'), 'utf8')).publication,
-      null,
+    const result = spawnSync(
+      process.execPath,
+      ['--input-type=module', '--eval', reviewStepSource(workflow)],
+      { env, encoding: 'utf8' },
     )
+    assert.equal(result.status, 0, result.stderr)
+    const stagedContext = JSON.parse(
+      await readFile(join(directory, 'publication', 'context.json'), 'utf8'),
+    )
+    assert.deepEqual(stagedContext, context)
+    const reply = JSON.parse(await readFile(join(directory, 'publication', 'reply.json'), 'utf8'))
+    assert.equal(JSON.stringify(reply).includes('private-provider-context'), false)
+    assert.deepEqual(reply, { version: 1, comment: 'No confirmed defects', publication: null })
+
+    const app = { login: 'implement[bot]', id: 123 }
+    const draft = { ...pr, draft: true, user: { ...app, type: 'Bot' } }
+    const comments = []
+    const api = async (route) => (route === '/pulls/9' ? draft : comments)
+    const comment = async (number, body) => {
+      assert.equal(number, 9)
+      comments.push({ user: { login: 'github-actions[bot]' }, body })
+    }
+    const run = 'https://github.com/o/r/actions/runs/1'
+    await publishReview(reply, stagedContext, api, comment, run, app)
+    await publishReview(reply, stagedContext, api, comment, run, app)
+    assert.equal(comments.length, 1)
+    assert.match(comments[0].body, /independent-review:abc/)
+    assert.ok(comments[0].body.includes(run))
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

@@ -90,14 +90,24 @@ export const protocolExamples = [
   },
 ]
 
-export function protocolInstruction() {
-  return [
+export function protocolInstruction({ review = false } = {}) {
+  const common = [
     'OUTPUT PROTOCOL: Call submit_reply with the complete result. Final response text is ignored.',
     'Put Markdown directly in comment and body strings. Do not wrap the result in a JSON string.',
     'After acceptance do not change the result. Only identical repeated submissions are allowed.',
     'version must be 1. comment must be a nonempty string after JavaScript trim(), at most ' +
       limits.comment +
       ' UTF-16 code units.',
+  ]
+  if (review)
+    return [
+      ...common,
+      'publication must be explicitly null.',
+      'Example:',
+      JSON.stringify(protocolExamples[0]),
+    ].join('\n')
+  return [
+    ...common,
     'publication may be absent or null; additional fields are allowed.',
     'publication.kind must be spec or tickets. items must contain 1 to ' +
       limits.items +
