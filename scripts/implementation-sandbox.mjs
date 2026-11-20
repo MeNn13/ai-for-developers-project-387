@@ -12,6 +12,7 @@ const writable = [
   'frontend/node_modules/.tmp',
   'frontend/node_modules/.vite-temp',
   'node_modules/.vite-temp',
+  'node_modules/.vitest-cache',
   '.rumdl_cache',
 ]
 for (const entry of readdirSync('backend', { withFileTypes: true })) {
