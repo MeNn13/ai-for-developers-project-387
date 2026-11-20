@@ -485,8 +485,7 @@ jobs:
           mise trust
           mise run install
           mise exec -- npx playwright install --with-deps --only-shell chromium
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
+          bash "$GITHUB_WORKSPACE/scripts/install-implementation-sandbox.sh"
       - name: Construct filtered candidate commit
         if: steps.gate.outputs.allowed == 'true'
         run: node scripts/implementation-repair.mjs candidate

@@ -17,6 +17,7 @@ const phase = ['first', 'final'].includes(process.argv[2]) ? process.argv[2] : '
 let activeTicket = 'none'
 let reviewAxis
 let operation = 'preflight'
+let checkedSha
 const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
 const requireValue = (ok) => {
   if (!ok) throw new Error('initial_graph_failed')
@@ -26,7 +27,7 @@ const root = process.env.INITIAL_CANDIDATE_ROOT
 const directory = process.env.INITIAL_IO
 const read = async (name) => JSON.parse(await readFile(`${directory}/${name}.json`, 'utf8'))
 const write = (name, value) => writeFile(`${directory}/${name}.json`, JSON.stringify(value))
-function command(bin, args, options = {}, modelCall = false) {
+function command(bin, args, options = {}, modelCall = false, onFailure) {
   const timeout = options.timeout
   // GNU timeout controls the process group, including model/check descendants.
   const bounded = process.platform === 'linux' && Number.isFinite(timeout)
@@ -52,6 +53,7 @@ function command(bin, args, options = {}, modelCall = false) {
   if ((bounded && [124, 137].includes(child.status)) || child.error?.code === 'ETIMEDOUT')
     throw new ImplementationFailure('timeout')
   if (modelCall) return decodeModel(child, bounded)
+  if (child.status !== 0 && onFailure) throw onFailure(child)
   requireValue(child.status === 0)
   return child.stdout?.trim()
 }
@@ -66,12 +68,36 @@ function clean() {
 }
 function checked(context) {
   operation = 'check'
-  command(process.execPath, [resolve(trustedRoot, 'scripts/implementation-sandbox.mjs')], {
-    stdio: 'ignore',
-    timeout: remaining(context),
-    env: { ...process.env, REPAIR_CANDIDATE_ROOT: root, OPENCODE_API_KEY: '', GH_TOKEN: '' },
-  })
-  clean()
+  checkedSha = git(['rev-parse', 'HEAD'])
+  requireValue(/^[a-f0-9]{40}$/.test(checkedSha))
+  command(
+    process.execPath,
+    [resolve(trustedRoot, 'scripts/implementation-sandbox.mjs')],
+    {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: remaining(context),
+      env: { ...process.env, REPAIR_CANDIDATE_ROOT: root, OPENCODE_API_KEY: '', GH_TOKEN: '' },
+    },
+    false,
+    (child) => {
+      if (child.status === 124) return new ImplementationFailure('timeout')
+      const detail = child.stdout?.trim()
+      return new ImplementationFailure(
+        detail === 'check_definition' || /^task_failed task=[a-z][a-z0-9:-]*$/.test(detail)
+          ? detail
+          : 'sandbox_launch',
+      )
+    },
+  )
+  const status = command(
+    'git',
+    ['status', '--porcelain', '--untracked-files=no'],
+    {},
+    false,
+    () => new ImplementationFailure('checkout_status_failed'),
+  )
+  if (status) throw new ImplementationFailure('checkout_dirty')
+  checkedSha = undefined
 }
 function model(context, instruction) {
   if (!process.env.OPENCODE_API_KEY) throw new ImplementationFailure('model_launch')
@@ -294,7 +320,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
         : ''
     const target = reviewAxis ? `axis=${reviewAxis}` : `ticket=${activeTicket}`
     const violation = error instanceof InvalidResult ? ` ${error.message}` : ''
-    const diagnostic = `${prefix} phase=${phase} ${target} operation=${operation} category=${category}${status}${violation}`
+    const sha =
+      operation === 'check' && /^[a-f0-9]{40}$/.test(checkedSha) ? ` sha=${checkedSha}` : ''
+    const diagnostic = `${prefix} phase=${phase} ${target} operation=${operation} category=${category}${status}${violation}${sha}`
     console.error(diagnostic)
     if (process.env.GITHUB_OUTPUT)
       await appendFile(

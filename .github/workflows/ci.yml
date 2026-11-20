@@ -23,6 +23,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  implementation-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          version: '2026.10.12'
+      - name: Prepare isolated candidate worktree
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/candidate" HEAD
+          cd "$RUNNER_TEMP/candidate"
+          mise trust
+          mise run install
+          mise exec -- npx playwright install --with-deps --only-shell chromium
+          bash "$GITHUB_WORKSPACE/scripts/install-implementation-sandbox.sh"
+      - name: Exercise first ticket through the Linux sandbox
+        env:
+          INITIAL_CANDIDATE_ROOT: ${{ runner.temp }}/candidate
+        run: |
+          chmod +x scripts/check-implementation-ci.mjs
+          mise run test:implementation-ci
+
   windows-worktrees:
     runs-on: windows-2025
     timeout-minutes: 10

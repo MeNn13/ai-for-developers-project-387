@@ -74,6 +74,9 @@ run = "node scripts/encoding-check.mjs"
 env = { MISE_TEST_BIN = "{{mise_bin}}" }
 run = "node --import ./scripts/test-git-environment.mjs --test scripts/*.test.mjs"
 
+[tasks."test:implementation-ci"]
+run = "node scripts/check-implementation-ci.mjs"
+
 [tasks.knip]
 run = "npm run knip"
 
