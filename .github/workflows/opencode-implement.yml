@@ -1,4 +1,4 @@
-﻿name: opencode-implement
+name: opencode-implement
 
 on:
   workflow_dispatch:
@@ -108,8 +108,7 @@ jobs:
       - name: Install pinned read-only model and isolation
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
+          bash "$GITHUB_WORKSPACE/scripts/install-implementation-sandbox.sh"
           curl --fail --silent --show-error --location https://github.com/anomalyco/opencode/releases/download/v2.2.3/opencode-linux-x64.tar.gz --output "$RUNNER_TEMP/opencode.tar.gz"
           echo "ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35  $RUNNER_TEMP/opencode.tar.gz" | sha256sum --check
           mkdir -p "$RUNNER_TEMP/opencode-bin"
@@ -267,8 +266,7 @@ jobs:
       - name: Install pinned read-only model and isolation
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
+          bash "$GITHUB_WORKSPACE/scripts/install-implementation-sandbox.sh"
           curl --fail --silent --show-error --location https://github.com/anomalyco/opencode/releases/download/v2.2.3/opencode-linux-x64.tar.gz --output "$RUNNER_TEMP/opencode.tar.gz"
           echo "ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35  $RUNNER_TEMP/opencode.tar.gz" | sha256sum --check
           mkdir -p "$RUNNER_TEMP/opencode-bin"

@@ -321,9 +321,21 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
     },
   )
   writeFileSync(join(candidate, '.gitignore'), 'node_modules/\nartifacts/\n')
+  const baselineContract = `import "@typespec/http";
+import "@typespec/openapi";
+using TypeSpec.Http;
+using TypeSpec.OpenAPI;
+@service(#{ title: "Booking Calendar API" })
+namespace BookingCalendar;
+@route("/meetings/{id}") @delete @operationId("cancelMeeting")
+op cancelMeeting(@path id: string): FixtureReceipt;
+model FixtureReceipt { id: string; }
+`
+  writeFileSync(join(candidate, 'contract/main.tsp'), baselineContract)
+  execFileSync(process.execPath, ['scripts/generate.mjs'], { cwd: candidate, stdio: 'pipe' })
   const contract =
-    readFileSync(join(candidate, 'contract/main.tsp'), 'utf8').replaceAll('\r\n', '\n') +
-    '\n@route("/meetings/{id}")\n@delete\n@operationId("cancelMeeting")\nop cancelMeeting(@path id: string): NoContentResponse | CancelFixtureError;\n' +
+    baselineContract +
+    '\n@route("/fixture/{id}")\n@delete\n@operationId("removeFixture")\nop removeFixture(@path id: string): NoContentResponse | CancelFixtureError;\n' +
     '@error model CancelFixtureError { @statusCode statusCode: 409; @body body: CancelFixtureProblem; }\n' +
     'model CancelFixtureProblem { type: "meeting-already-started"; }\n'
   git('add', '.')
@@ -412,10 +424,26 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
     `,
   )
   const preload = join(dir, 'adapter.mjs')
+  const sandboxResponse = join(io, 'sandbox.json')
+  writeFileSync(sandboxResponse, JSON.stringify({ status: 0 }))
   // Only the external model and Linux check adapter are fake; Git and candidate construction run.
   writeFileSync(
     preload,
-    `import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const spawn=cp.spawnSync;cp.spawnSync=(bin,args,opts)=>args?.some(a=>a.endsWith?.('implementation-sandbox.mjs'))?{status:0}:(bin==='opencode'||(bin==='timeout'&&args.includes('opencode')))?spawn(process.execPath,[${JSON.stringify(fake)}],opts):spawn(bin,args,opts);syncBuiltinESMExports();`,
+    `import cp from 'node:child_process'
+    import {syncBuiltinESMExports} from 'node:module'
+    import {readFileSync,appendFileSync} from 'node:fs'
+    const spawn=cp.spawnSync
+    cp.spawnSync=(bin,args,opts)=>{
+      if(args?.some(a=>a.endsWith?.('implementation-sandbox.mjs'))) {
+        const response=JSON.parse(readFileSync(${JSON.stringify(sandboxResponse)}))
+        if(response.dirty) appendFileSync(opts.cwd+'/README.md','changed')
+        return response
+      }
+      if(bin==='opencode'||(bin==='timeout'&&args.includes('opencode')))
+        return spawn(process.execPath,[${JSON.stringify(fake)}],opts)
+      return spawn(bin,args,opts)
+    }
+    syncBuiltinESMExports()`,
   )
   const execute = (phase, failure) => {
     const output = join(io, 'output')
@@ -441,12 +469,14 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
       },
     )
     if (failure) {
+      failure = failure.replace('{head}', git('rev-parse', 'HEAD'))
+      const timedOut = failure.includes('category=timeout')
       assert.equal(result.status, 1)
       assert.doesNotMatch(result.stdout + result.stderr, /SECRET_MARKER/)
       assert.ok(result.stderr.includes(failure), result.stderr)
       assert.equal(
         readFileSync(output, 'utf8'),
-        `reason=unknown\ndiagnostic=initial_graph_failed ${failure}\n`,
+        `reason=${timedOut ? 'timeout' : 'unknown'}\ndiagnostic=${timedOut ? 'initial_timeout' : 'initial_graph_failed'} ${failure}\n`,
       )
       return
     }
@@ -466,11 +496,11 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
   assert.equal(first.ready, false)
   assert.equal(git('rev-parse', first.candidateSha + '^'), base)
   assert.match(git('show', 'HEAD:GLOSSARY.md'), /Отмена встречи/)
-  assert.match(git('show', 'HEAD:contract/openapi/openapi.yaml'), /operationId: cancelMeeting/)
+  assert.match(git('show', 'HEAD:contract/openapi/openapi.yaml'), /operationId: removeFixture/)
   assert.ok(
     first.files.some(
       ({ path, content }) =>
-        path.startsWith('frontend/src/api/generated/') && content?.includes('cancelMeeting'),
+        path.startsWith('frontend/src/api/generated/') && content?.includes('removeFixture'),
     ),
   )
   assert.ok(
@@ -481,6 +511,17 @@ test('CLI integrates real Git ticket commits in dependency order and emits draft
     ),
   )
   context.expectedHead = first.candidateSha
+  for (const [response, category] of [
+    [{ status: 1, stdout: 'sandbox_launch' }, 'sandbox_launch'],
+    [{ status: 124 }, 'timeout'],
+    [{ status: 0, dirty: true }, 'checkout_dirty'],
+  ]) {
+    writeFileSync(sandboxResponse, JSON.stringify(response))
+    execute('final', 'phase=final ticket=58 operation=check category=' + category + ' sha={head}')
+    git('restore', 'README.md')
+    git('checkout', '--detach', first.candidateSha)
+  }
+  writeFileSync(sandboxResponse, JSON.stringify({ status: 0 }))
   for (const [script, diagnostic] of [
     [
       "console.error('SECRET_MARKER'); process.exitCode=7",
