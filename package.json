@@ -22,10 +22,10 @@
   "devDependencies": {
     "@commitlint/cli": "21.2.4",
     "@commitlint/config-conventional": "21.2.4",
-    "@playwright/test": "1.65.0",
-    "agnix": "0.59.3",
-    "knip": "6.43.0",
-    "prettier": "3.9.10",
+    "@playwright/test": "1.65.1",
+    "agnix": "0.61.0",
+    "knip": "6.45.1",
+    "prettier": "3.10.1",
     "syncpack": "15.3.3"
   }
 }
