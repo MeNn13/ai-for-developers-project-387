@@ -3,8 +3,7 @@ import test from 'node:test'
 import { initialContext, initialAdmission } from './implementation-initial.mjs'
 import { prepare } from './opencode.mjs'
 import {
-  copyFileSync,
-  cpSync,
+  existsSync,
   mkdtempSync,
   writeFileSync,
   readFileSync,
@@ -13,7 +12,7 @@ import {
   symlinkSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { spawnSync, execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { initialCompletion } from './implementation-initial-completion.mjs'
@@ -51,14 +50,35 @@ function api(path) {
     }
   throw new Error('unavailable')
 }
+test('initial worktrees use local objects and keep fetch credentials out of preparation', () => {
+  const workflow = readFileSync(
+    new URL('../.github/workflows/opencode-implement.yml', import.meta.url),
+    'utf8',
+  )
+  const steps = workflow.split(/\n      - /)
+  const preparations = steps.filter((step) =>
+    step.startsWith('name: Prepare isolated candidate worktree'),
+  )
+  assert.equal(preparations.length, 1)
+  for (const step of preparations) {
+    assert.match(step, /git worktree add --detach/)
+    assert.doesNotMatch(step, /git fetch|GH_TOKEN/)
+  }
+  assert.equal(steps.filter((step) => step.includes('implementation-graph.mjs')).length, 1)
+  assert.equal(steps.filter((step) => step.includes('implementation-publish.mjs')).length, 1)
+})
+
 test('explicit current consent binds the native ticket graph and immutable snapshots', async () => {
   const result = await initialContext(event, api, trust)
   assert.equal(result.approval, 10)
   assert.equal(result.source, 1)
+  assert.match(result.commitDate, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
   assert.deepEqual(result.graph, [
     { number: 3, blockedBy: [] },
     { number: 4, blockedBy: [3] },
   ])
+  assert.equal(result.phase, 'single')
+  assert.deepEqual(result.order, [3, 4])
   assert.deepEqual(
     result.snapshots.map((s) => s.number),
     [1, 2, 3, 4],
@@ -243,412 +263,152 @@ test('independent initial completion reports cancellation and timeout without ar
   }
 })
 
-test('expired initial deadline reports timeout before any model or candidate command', (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'initial-timeout-'))
+test('one CLI call edits both dependent tickets and exact-SHA verification gates the result', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'initial-single-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
-  writeFileSync(join(directory, 'context.json'), JSON.stringify({ phase: 'first', deadline: 0 }))
-  const output = join(directory, 'output')
-  writeFileSync(output, '')
-  const child = spawnSync(
-    process.execPath,
-    [join(import.meta.dirname, 'implementation-graph.mjs'), 'first'],
-    {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        INITIAL_IO: directory,
-        INITIAL_CANDIDATE_ROOT: directory,
-        GITHUB_OUTPUT: output,
-        GITHUB_RUN_ATTEMPT: '1',
-        OPENCODE_BIN: 'must-never-be-invoked',
-      },
-    },
-  )
-  assert.equal(child.status, 1)
-  assert.match(child.stderr, /initial_timeout/)
-  assert.equal(
-    readFileSync(output, 'utf8'),
-    'reason=timeout\ndiagnostic=initial_timeout phase=first ticket=none operation=preflight category=timeout\n',
-  )
-})
-
-test('CLI integrates real Git ticket commits in dependency order and emits draft then checked ready data', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'initial-graph-'))
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
-  const candidate = join(dir, 'candidate'),
-    io = join(dir, 'io')
-  mkdirSync(candidate)
-  mkdirSync(io)
-  const git = (...args) => execFileSync('git', args, { cwd: candidate, encoding: 'utf8' }).trim()
+  const root = join(directory, 'repo')
+  mkdirSync(join(root, 'frontend', 'src'), { recursive: true })
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
   git('init', '-q')
   git('config', 'user.name', 'Fixture')
   git('config', 'user.email', 'fixture@example.com')
-  git('config', 'core.autocrlf', 'false')
-  writeFileSync(join(candidate, 'README.md'), 'fixture')
-  writeFileSync(join(candidate, 'GLOSSARY.md'), '# Glossary\n')
-  const project = resolve(import.meta.dirname, '..')
-  const tracked = execFileSync(
-    'git',
-    [
-      'ls-files',
-      '--',
-      'contract',
-      'scripts/generate.mjs',
-      'frontend/src/api/generated',
-      'backend/BookingCalendar.Api/Generated',
-    ],
-    { cwd: project, encoding: 'utf8' },
-  )
-    .trim()
-    .split(/\r?\n/)
-  for (const path of tracked) {
-    const target = join(candidate, path)
-    mkdirSync(dirname(target), { recursive: true })
-    copyFileSync(join(project, path), target)
-  }
-  symlinkSync(
-    join(project, 'node_modules'),
-    join(candidate, 'node_modules'),
-    process.platform === 'win32' ? 'junction' : 'dir',
-  )
-  // The server generator patches its emitter in place, even during restricted checks.
-  cpSync(
-    join(project, 'contract/server/node_modules'),
-    join(candidate, 'contract/server/node_modules'),
-    {
-      recursive: true,
-      verbatimSymlinks: true,
-    },
-  )
-  writeFileSync(join(candidate, '.gitignore'), 'node_modules/\nartifacts/\n')
-  const baselineContract = `import "@typespec/http";
-import "@typespec/openapi";
-using TypeSpec.Http;
-using TypeSpec.OpenAPI;
-@service(#{ title: "Booking Calendar API" })
-namespace BookingCalendar;
-@route("/meetings/{id}") @delete @operationId("cancelMeeting")
-op cancelMeeting(@path id: string): FixtureReceipt;
-model FixtureReceipt { id: string; }
-`
-  writeFileSync(join(candidate, 'contract/main.tsp'), baselineContract)
-  execFileSync(process.execPath, ['scripts/generate.mjs'], { cwd: candidate, stdio: 'pipe' })
-  const contract =
-    baselineContract +
-    '\n@route("/fixture/{id}")\n@delete\n@operationId("removeFixture")\nop removeFixture(@path id: string): NoContentResponse | CancelFixtureError;\n' +
-    '@error model CancelFixtureError { @statusCode statusCode: 409; @body body: CancelFixtureProblem; }\n' +
-    'model CancelFixtureProblem { type: "meeting-already-started"; }\n'
+  writeFileSync(join(root, 'README.md'), 'fixture\n')
+  writeFileSync(join(root, 'frontend', 'src', 'old.ts'), 'export {}\n')
   git('add', '.')
   git('commit', '-qm', 'chore: initialize fixture')
   const base = git('rev-parse', 'HEAD')
-  const context = {
-    version: 1,
-    runId: 7,
-    trustedSha: base,
-    base,
-    expectedHead: base,
-    tickets: [57, 58, 59],
-    graph: [
-      { number: 57, blockedBy: [] },
-      { number: 58, blockedBy: [57] },
-      { number: 59, blockedBy: [58] },
-    ],
-    deadline: Date.now() + 120000,
-    commitDate: '2026-11-15T00:00:00Z',
+  const context = await initialContext(event, api, { ...trust, trustedSha: base })
+  const adapter = join(directory, 'adapter.mjs')
+  writeFileSync(
+    adapter,
+    `
+import assert from 'node:assert/strict'
+import cp from 'node:child_process'
+import {syncBuiltinESMExports} from 'node:module'
+import {appendFileSync, existsSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
+import {join} from 'node:path'
+const spawn = cp.spawnSync
+cp.spawnSync = (bin, args, opts) => {
+  if (bin === '/usr/bin/bwrap' || args.includes('/usr/bin/bwrap')) {
+    assert.equal(opts.env.GH_TOKEN, undefined)
+    assert.equal(opts.env.PUBLISH_APP_PRIVATE_KEY, undefined)
+    assert.equal(opts.env.OPENCODE_API_KEY, 'fixture-key')
+    assert.ok(!args.includes(process.env.INITIAL_IO))
+    const workspace = args[args.indexOf('--bind') + 1]
+    assert.equal(existsSync(join(workspace, '.git')), false)
+    const context = JSON.parse(opts.input.split('UNTRUSTED APPROVED CONTEXT:\\n')[1])
+    assert.deepEqual(context.order,[3,4])
+    appendFileSync(join(process.env.INITIAL_IO,'calls'), 'run\\n')
+    const scenario = process.env.SCENARIO
+    if (scenario === 'provider') return {
+      status: 0,
+      stdout: JSON.stringify({type:'error',error:{type:'api',status:429,message:'SECRET_MARKER'}}),
+    }
+    if (scenario === 'empty') return finished()
+    if (scenario === 'protected') writeFileSync(join(workspace, 'REVIEW.md'),'SECRET_MARKER')
+    if (scenario === 'binary') writeFileSync(join(workspace, 'frontend/src/binary.ts'),Buffer.from([0,255]))
+    if (scenario === 'symlink') {
+      renameSync(join(workspace, 'frontend/src'), join(workspace, 'frontend/hidden'))
+      symlinkSync(process.env.INITIAL_IO, join(workspace, 'frontend/src'), process.platform === 'win32' ? 'junction' : 'dir')
+      return finished()
+    }
+    if (scenario === 'generated') {
+      const path = join(workspace,'frontend/src/api/generated')
+      mkdirSync(path, {recursive:true})
+      writeFileSync(join(path,'test.ts'),'export {}\\n')
+    }
+    if (scenario === 'generation') {
+      mkdirSync(join(workspace,'contract'))
+      writeFileSync(join(workspace,'contract/main.tsp'),'broken')
+    }
+    writeFileSync(join(workspace,'frontend/src/first.ts'), 'export const first = true\\n')
+    writeFileSync(join(workspace,'frontend/src/second.ts'), 'import { first } from "./first"\\n')
+    rmSync(join(workspace,'frontend/src/old.ts'))
+    return finished()
   }
-  const fake = join(dir, 'model.mjs')
-  const fixtureEvents = `
-    const emit = (type, messageID, part) => console.log(JSON.stringify({
-      type, timestamp: 1, sessionID: 'ses_graph',
-      part: { sessionID: 'ses_graph', messageID, ...part },
-    }))
-    const text = (text, id = 'msg_final') => emit('text', id, { type: 'text', text })
-    const finish = (reason = 'stop', id = 'msg_final') =>
-      emit('step_finish', id, { type: 'step-finish', reason })
-  `
-  const fakeReplies = join(io, 'fake-replies.json')
-  writeFileSync(fakeReplies, JSON.stringify({ contract }))
-  writeFileSync(
-    fake,
-    `${fixtureEvents}
-    import assert from 'node:assert/strict'
-    import {readFileSync} from 'node:fs'
-    let input = ''
-    for await (const chunk of process.stdin) input += chunk
-    assert.equal(process.env.GH_TOKEN, undefined)
-    assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY, undefined)
-    const context = JSON.parse(input.split('UNTRUSTED APPROVED CONTEXT:\\n')[1])
-    const overrides = JSON.parse(readFileSync(${JSON.stringify(fakeReplies)}, 'utf8'))
-    const n = context.activeTicket?.number
-    const standards = input.startsWith('Perform independent Standards review')
-    if (!n) {
-      assert.equal(context.review.base, context.base)
-      assert.equal(context.review.head, context.integrations.at(-1).sha)
-      for (const ticket of [57,58,59]) {
-        assert.ok(context.review.diff.includes('diff --git a/frontend/src/ticket' + ticket + '.ts'))
-        const expected = ticket === 58 && !standards ? 'false' : 'true'
-        assert.ok(context.review.diff.includes('+export const ticket' + ticket + ' = ' + expected))
-      }
-    }
-    const path = 'frontend/src/ticket58.ts'
-    const review = { findings: [], risk: 'Entire UI change', rollback: 'Revert; no persistent data', repair: null }
-    if (standards) {
-      review.findings.push({ path, line: 1, conditions: 'Flag is enabled', consequences: 'Fixture defaults to enabled' })
-      review.repair = {
-        version: 1, message: 'fix: disable the fixture flag (#58)',
-        files: [{path, mode: '100644', content: 'export const ticket58 = false\\n'}],
-        risk: 'Changes default flag', rollback: 'Revert; no persistent data',
-      }
-    }
-    const reply = n ? {
-      version: 1, message: 'feat: implement ticket (#' + n + ')',
-      files: [{path: 'frontend/src/ticket' + n + '.ts', mode: '100644', content: 'export const ticket' + n + ' = true\\n'}],
-      risk: 'UI consequences', rollback: 'Revert; no persistent data',
-    } : review
-    if (n === 57) reply.files.push(
-      {path: 'contract/main.tsp', mode: '100644', content: overrides.contract},
-      {path: 'GLOSSARY.md', mode: '100644', content: '# Glossary\\n\\n## Отмена встречи\\n'},
-    )
-    if (n === 59) reply.files.push(
-      {path: 'README.md', mode: '100644', content: 'Отмена освобождает слот.\\n'},
-    )
-    emit('step_start', 'msg_read', {type: 'step-start'})
-    text('I will read the instructions.', 'msg_read')
-    emit('tool_use', 'msg_read', {type: 'tool', tool: 'read', state: {status: 'completed'}})
-    finish('tool-calls', 'msg_read')
-    emit('step_start', 'msg_final', {type: 'step-start'})
-    const json = JSON.stringify(overrides.result ?? reply)
-    text(json.slice(0, 10))
-    finish()
-    text(json.slice(10))
-    `,
+  if (args.some(a => a.endsWith('implementation-sandbox.mjs'))) {
+    assert.equal(opts.env.OPENCODE_API_KEY, undefined)
+    assert.equal(opts.env.GH_TOKEN, undefined)
+    const head = spawn('git',['rev-parse','HEAD'],opts).stdout.trim()
+    writeFileSync(join(process.env.INITIAL_IO,'checked'), head)
+    return process.env.SCENARIO === 'check'
+      ? {status: 1, stdout: 'task_failed task=lint\\n', stderr: 'SECRET_MARKER'}
+      : {status: 0}
+  }
+  return spawn(bin,args,opts)
+}
+function finished() {
+  const sessionID = 'single'
+  const output = (type, fields) => JSON.stringify({type, sessionID, part:{sessionID,messageID:'final',...fields}})
+  return {status:0,stdout:[output('text',{text:'## Both tickets complete'}),output('step_finish',{reason:'stop'})].join('\\n')}
+}
+syncBuiltinESMExports()
+`,
   )
-  const preload = join(dir, 'adapter.mjs')
-  const sandboxResponse = join(io, 'sandbox.json')
-  writeFileSync(sandboxResponse, JSON.stringify({ status: 0 }))
-  // Only the external model and Linux check adapter are fake; Git and candidate construction run.
-  writeFileSync(
-    preload,
-    `import cp from 'node:child_process'
-    import {syncBuiltinESMExports} from 'node:module'
-    import {readFileSync,appendFileSync} from 'node:fs'
-    const spawn=cp.spawnSync
-    cp.spawnSync=(bin,args,opts)=>{
-      if(args?.some(a=>a.endsWith?.('implementation-sandbox.mjs'))) {
-        const response=JSON.parse(readFileSync(${JSON.stringify(sandboxResponse)}))
-        if(response.dirty) appendFileSync(opts.cwd+'/README.md','changed')
-        return response
-      }
-      if(bin==='opencode'||(bin==='timeout'&&args.includes('opencode')))
-        return spawn(process.execPath,[${JSON.stringify(fake)}],opts)
-      return spawn(bin,args,opts)
-    }
-    syncBuiltinESMExports()`,
-  )
-  const execute = (phase, failure) => {
-    const output = join(io, 'output')
-    writeFileSync(output, '')
-    context.phase = phase === 'first' ? 'first' : 'final'
-    writeFileSync(join(io, 'context.json'), JSON.stringify(context))
-    const result = spawnSync(
+  for (const [scenario, category] of [
+    ['provider', 'provider_error'],
+    ['empty', 'empty_diff'],
+    ['protected', 'file_rules'],
+    ['binary', 'file_rules'],
+    ['symlink', 'file_rules'],
+    ['generated', 'file_rules'],
+    ['timeout', 'timeout'],
+    ['check', 'check_failed'],
+    ['valid', null],
+    ['generation', 'generation_failed'],
+  ]) {
+    git('checkout', '-q', '--detach', base)
+    const io = join(directory, scenario)
+    mkdirSync(io)
+    const path = (file) => join(io, file)
+    const json = (name) => JSON.parse(readFileSync(path(name + '.json'), 'utf8'))
+    writeFileSync(
+      path('context.json'),
+      JSON.stringify({
+        ...context,
+        deadline: scenario === 'timeout' ? 0 : Date.now() + 120000,
+      }),
+    )
+    const child = spawnSync(
       process.execPath,
-      [join(import.meta.dirname, 'implementation-graph.mjs'), phase],
+      [join(import.meta.dirname, 'implementation-graph.mjs')],
       {
         encoding: 'utf8',
         env: {
           ...process.env,
-          NODE_OPTIONS: '--import ' + pathToFileURL(preload).href,
-          GITHUB_OUTPUT: output,
-          GITHUB_RUN_ATTEMPT: '1',
           INITIAL_IO: io,
-          INITIAL_CANDIDATE_ROOT: candidate,
-          OPENCODE_API_KEY: 'fake',
-          GH_TOKEN: 'do-not-pass',
-          PUBLISH_APP_PRIVATE_KEY: 'do-not-pass',
+          INITIAL_CANDIDATE_ROOT: root,
+          OPENCODE_BIN: 'fixture',
+          OPENCODE_API_KEY: 'fixture-key',
+          GH_TOKEN: 'SECRET_MARKER',
+          PUBLISH_APP_PRIVATE_KEY: 'SECRET_MARKER',
+          SCENARIO: scenario,
+          GITHUB_STEP_SUMMARY: path('summary'),
+          NODE_OPTIONS: '--import ' + pathToFileURL(adapter).href,
         },
       },
     )
-    if (failure) {
-      failure = failure.replace('{head}', git('rev-parse', 'HEAD'))
-      const timedOut = failure.includes('category=timeout')
-      assert.equal(result.status, 1)
-      assert.doesNotMatch(result.stdout + result.stderr, /SECRET_MARKER/)
-      assert.ok(result.stderr.includes(failure), result.stderr)
-      assert.equal(
-        readFileSync(output, 'utf8'),
-        `reason=${timedOut ? 'timeout' : 'unknown'}\ndiagnostic=${timedOut ? 'initial_timeout' : 'initial_graph_failed'} ${failure}\n`,
+    if (scenario !== 'timeout') assert.equal(readFileSync(path('calls'), 'utf8'), 'run\n')
+    assert.equal(child.status, category ? 1 : 0, child.stderr)
+    if (category) {
+      assert.equal(json('diagnostic').category, category, child.stderr)
+      if (scenario === 'check') assert.equal(json('diagnostic').task, 'lint')
+      assert.match(readFileSync(path('summary'), 'utf8'), new RegExp(category))
+      assert.doesNotMatch(child.stdout + child.stderr, /SECRET_MARKER/)
+      assert.equal(existsSync(path('result.json')), false)
+      assert.equal(existsSync(path('verification.json')), false)
+    } else {
+      const result = json('result')
+      assert.equal(result.ready, true)
+      assert.deepEqual(
+        result.files.map(({ path }) => path),
+        ['frontend/src/first.ts', 'frontend/src/old.ts', 'frontend/src/second.ts'],
       )
-      return
+      assert.equal(result.files[1].content, null)
+      assert.equal(result.candidateSha, git('rev-parse', 'HEAD'))
+      assert.equal(git('rev-parse', 'HEAD^'), base)
+      assert.equal(json('verification').sha, readFileSync(path('checked'), 'utf8'))
+      assert.equal(json('verification').sha, result.candidateSha)
     }
-    assert.equal(result.status, 0, result.stderr)
-    assert.equal(readFileSync(output, 'utf8'), '')
-    assert.doesNotMatch(result.stderr, /graph_failed/)
-    return JSON.parse(readFileSync(join(io, 'result.json')))
   }
-  const successModel = readFileSync(fake)
-  writeFileSync(
-    fake,
-    `console.error('SECRET_MARKER'); console.log(JSON.stringify({type:'error',error:{type:'api',message:'SECRET_MARKER',status:429}})); process.exitCode=1`,
-  )
-  execute('first', 'phase=first ticket=57 operation=model category=provider_error status=429')
-  writeFileSync(fake, successModel)
-  const first = execute('first')
-  assert.equal(first.ready, false)
-  assert.equal(git('rev-parse', first.candidateSha + '^'), base)
-  assert.match(git('show', 'HEAD:GLOSSARY.md'), /Отмена встречи/)
-  assert.match(git('show', 'HEAD:contract/openapi/openapi.yaml'), /operationId: removeFixture/)
-  assert.ok(
-    first.files.some(
-      ({ path, content }) =>
-        path.startsWith('frontend/src/api/generated/') && content?.includes('removeFixture'),
-    ),
-  )
-  assert.ok(
-    first.files.some(
-      ({ path, content }) =>
-        path.startsWith('backend/BookingCalendar.Api/Generated/') &&
-        content?.includes('CancelFixtureProblem'),
-    ),
-  )
-  context.expectedHead = first.candidateSha
-  for (const [response, category] of [
-    [{ status: 1, stdout: 'sandbox_launch' }, 'sandbox_launch'],
-    [{ status: 124 }, 'timeout'],
-    [{ status: 0, dirty: true }, 'checkout_dirty'],
-  ]) {
-    writeFileSync(sandboxResponse, JSON.stringify(response))
-    execute('final', 'phase=final ticket=58 operation=check category=' + category + ' sha={head}')
-    git('restore', 'README.md')
-    git('checkout', '--detach', first.candidateSha)
-  }
-  writeFileSync(sandboxResponse, JSON.stringify({ status: 0 }))
-  for (const [script, diagnostic] of [
-    [
-      "console.error('SECRET_MARKER'); process.exitCode=7",
-      'operation=model category=model_exit status=7',
-    ],
-    ['', 'operation=model category=incomplete_stream'],
-    ["text('{}'); finish('length')", 'operation=model category=incomplete_stream'],
-    [
-      "text('{}'); finish(); text('SECRET_MARKER','msg_unfinished')",
-      'operation=model category=incomplete_stream',
-    ],
-    ["console.log('{}')", 'operation=model category=invalid_event_stream'],
-    ["console.log('SECRET_MARKER')", 'operation=model category=invalid_event_stream'],
-    ["text('{'); finish()", 'operation=model category=invalid_result_json'],
-    ["text('{}'); finish(); text('SECRET_MARKER')", 'operation=model category=invalid_result_json'],
-    [
-      "text('SECRET_MARKER'.repeat(200000)); finish()",
-      'operation=model category=model_output_limit',
-    ],
-    [
-      `console.log(JSON.stringify({type:'error',error:{name:'SECRET_MARKER'}}))`,
-      'operation=model category=unknown',
-    ],
-    [
-      "text('{}'); finish()",
-      'operation=validate category=invalid_result field=result.version rule=required',
-    ],
-  ]) {
-    writeFileSync(fake, fixtureEvents + '\n' + script)
-    execute('final', 'phase=final ticket=58 ' + diagnostic)
-  }
-  writeFileSync(fake, successModel)
-  const file = { path: 'frontend/src/ticket58.ts', mode: '100644', content: 'SECRET_MARKER' }
-  const reply = {
-    version: 1,
-    message: 'feat: implement ticket (#58)',
-    files: [file],
-    risk: 'SECRET_MARKER',
-    rollback: 'Revert',
-  }
-  for (const [change, diagnostic] of [
-    [
-      { message: 'feat: ' + 'SECRET_MARKER'.repeat(7) + ' (#58)' },
-      'result.message rule=max_length max=72',
-    ],
-    [{ message: 'feat: wrong ticket SECRET_MARKER (#57)' }, 'result.message rule=approved_ticket'],
-    [{ files: [] }, 'result.files rule=file_count min=1 max=200'],
-    [
-      { files: [{ ...file, path: 'docs/SECRET_MARKER.md' }] },
-      'result.files.path rule=protected_path index=0',
-    ],
-    [
-      { files: [{ ...file, path: 'frontend/src/api/Generated/SECRET_MARKER.ts' }] },
-      'result.files.path rule=generated_path index=0',
-    ],
-    [
-      { files: [{ ...file, path: 'GLOSSARY.md', content: null }] },
-      'result.files.content rule=document_deletion index=0',
-    ],
-    [
-      { files: [{ ...file, path: './GLOSSARY.md' }] },
-      'result.files.path rule=protected_path index=0',
-    ],
-  ]) {
-    writeFileSync(fakeReplies, JSON.stringify({ contract, result: { ...reply, ...change } }))
-    execute(
-      'final',
-      'phase=final ticket=58 operation=validate category=invalid_result field=' + diagnostic,
-    )
-  }
-  writeFileSync(fakeReplies, JSON.stringify({ contract }))
-  const final = execute('final')
-  assert.equal(final.ready, true)
-  assert.equal(git('rev-parse', final.candidateSha + '^'), first.candidateSha)
-  const integrations = JSON.parse(readFileSync(join(io, 'integrations.json')))
-  assert.deepEqual(
-    integrations.map((r) => r.label),
-    ['ticket-57', 'ticket-58', 'ticket-59', 'review-Standards'],
-  )
-  assert.equal(integrations[3].base, integrations[2].sha)
-  assert.equal(integrations[3].conclusion, 'success')
-  assert.equal(
-    git('show', final.candidateSha + ':frontend/src/ticket58.ts'),
-    'export const ticket58 = false',
-  )
-  assert.match(git('show', 'HEAD:README.md'), /Отмена освобождает слот/)
-  assert.equal(JSON.parse(readFileSync(join(io, 'verification.json'))).sha, final.candidateSha)
-  assert.equal(git('status', '--porcelain'), '')
-
-  context.expectedHead = final.candidateSha
-  for (const [review, diagnostic] of [
-    [
-      {
-        findings: [
-          {
-            path: 'SECRET_MARKER',
-            line: 0,
-            conditions: 'SECRET_MARKER',
-            consequences: 'SECRET_MARKER',
-          },
-        ],
-        repair: {},
-      },
-      'review.findings.line rule=positive_integer index=0 min=1',
-    ],
-    [{ findings: [], repair: {} }, 'review.repair rule=matches_findings'],
-    [
-      {
-        findings: [
-          {
-            path: 'SECRET_MARKER',
-            line: 1,
-            conditions: 'SECRET_MARKER',
-            consequences: 'SECRET_MARKER',
-          },
-        ],
-        repair: { ...reply, files: [] },
-      },
-      'review.repair.files rule=file_count min=1 max=200',
-    ],
-  ]) {
-    const payload = JSON.stringify({ ...review, risk: 'UI', rollback: 'Revert code' })
-    writeFileSync(fake, fixtureEvents + `\ntext(${JSON.stringify(payload)}); finish()`)
-    execute(
-      'final',
-      'phase=final axis=Standards operation=validate category=invalid_result field=' + diagnostic,
-    )
-  }
-  assert.equal(git('rev-parse', 'HEAD'), final.candidateSha)
 })

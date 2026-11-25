@@ -107,7 +107,7 @@ export async function initialContext(event, api, trust) {
     trustedSha: trust.trustedSha,
     base: trust.trustedSha,
     expectedHead: trust.trustedSha,
-    commitDate: new Date().toISOString().replace(/\.\d{3}Z$/, ''),
+    commitDate: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     source,
     spec,
     tickets,
@@ -116,8 +116,8 @@ export async function initialContext(event, api, trust) {
     snapshots,
     graph,
     initial: true,
-    phase: 'first',
-    requirementsDigest: hash({ snapshots, graph, approval }),
+    phase: 'single',
+    order: [...done],
     deadline: Date.now() + 60 * 60 * 1000,
   }
   check(Buffer.byteLength(JSON.stringify(result)) < 300_000, 'initial_context_size')
@@ -218,28 +218,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       trustedSha: process.env.TRUSTED_SHA,
     })
     await initialAdmission(event, api, Number(process.env.GITHUB_RUN_ID))
-    if (process.argv[2] === 'rebind') {
-      const original = JSON.parse(await readFile(`${process.env.INITIAL_IO}/context.json`, 'utf8'))
-      check(
-        original.requirementsDigest === context.requirementsDigest,
-        'initial_changed_requirements',
-      )
-      const receipt = JSON.parse(
-        await readFile(`${process.env.INITIAL_IO}/publication.json`, 'utf8'),
-      )
-      check(
-        receipt.sourceRunId === context.runId &&
-          receipt.branch === `spec/${context.spec}` &&
-          /^[a-f0-9]{40}$/.test(receipt.head),
-        'initial_receipt',
-      )
-      Object.assign(context, {
-        deadline: original.deadline,
-        expectedHead: receipt.head,
-        phase: 'final',
-      })
-      check(Date.now() < context.deadline, 'initial_timeout')
-    }
     await mkdir(process.env.INITIAL_IO, { recursive: true })
     await writeFile(`${process.env.INITIAL_IO}/context.json`, JSON.stringify(context))
     await appendFile(process.env.GITHUB_OUTPUT, `source=${context.source}\nspec=${context.spec}\n`)

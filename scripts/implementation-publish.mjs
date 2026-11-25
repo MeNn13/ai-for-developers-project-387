@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { appendFile, readFile, writeFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { trustedOrigin } from './implementation-origin.mjs'
 
@@ -53,10 +53,21 @@ export async function publishImplementation(
       'trust',
     )
     const run = await api('GET', `/actions/runs/${trust.runId}`)
-    if (context.initial && !context.repair)
+    const single = context.initial && !context.repair && context.phase === 'single'
+    if (context.initial && !context.repair) {
       requireValue(
-        Number.isFinite(context.deadline) && Date.now() < context.deadline && run.run_attempt === 1,
-        'context',
+        Number.isFinite(context.deadline) && Date.now() < context.deadline,
+        'initial_timeout',
+      )
+      requireValue(run.run_attempt === 1, 'initial_rerun')
+    }
+    if (single)
+      requireValue(
+        run.path === '.github/workflows/opencode-implement.yml' &&
+          run.event === 'workflow_dispatch' &&
+          context.expectedHead === context.base &&
+          result.ready === true,
+        'origin',
       )
     requireValue(
       run.id === trust.runId &&
@@ -67,6 +78,7 @@ export async function publishImplementation(
         (context.repair || run.head_sha === trust.trustedSha) &&
         run.repository?.full_name === repository &&
         (run.conclusion === 'success' ||
+          (single && run.conclusion === 'failure' && trust.previous?.sourceRunId === run.id) ||
           (['.github/workflows/opencode.yml', '.github/workflows/opencode-implement.yml'].includes(
             run.path,
           ) &&
@@ -74,6 +86,14 @@ export async function publishImplementation(
       'origin',
     )
     const jobs = await api('GET', `/actions/runs/${trust.runId}/jobs?per_page=100`)
+    if (single)
+      requireValue(
+        ['implementation-context', 'implementation-check'].every((name) => {
+          const matching = jobs.jobs.filter((job) => job.name === name)
+          return matching.length === 1 && matching[0].conclusion === 'success'
+        }),
+        'checks',
+      )
     if (context.repair) {
       requireValue(trust.publisherRunId === trust.runId && positive(trust.runAttempt), 'trust')
       const admission = await api(
@@ -141,6 +161,13 @@ export async function publishImplementation(
         children.length === context.tickets.length &&
           children.length < 100 &&
           context.tickets.every((n) => children.some((c) => c.number === n)),
+        'context',
+      )
+      requireValue(
+        context.graph.length === context.tickets.length &&
+          context.tickets.every((number) =>
+            context.graph.some((ticket) => ticket.number === number),
+          ),
         'context',
       )
       for (const ticket of context.graph) {
@@ -230,6 +257,14 @@ export async function publishImplementation(
       )
     const payload = digest({ result, context })
     const previous = trust.recovery ?? trust.previous
+    if (single && (trust.publisherRunId !== run.id || run.conclusion === 'failure'))
+      requireValue(
+        head &&
+          previous?.sourceRunId === run.id &&
+          previous.head === result.candidateSha &&
+          previous.payload === payload,
+        'branch_ownership',
+      )
     if (trust.recovery)
       requireValue(
         context.repair &&
@@ -269,6 +304,7 @@ export async function publishImplementation(
       }
       if (previous.payload === payload) {
         // Retry the missing PR operation after a successful branch write.
+        requireValue(previous.head === result.candidateSha, 'commit_sha')
         return await finish(previous.head, pr)
       }
       requireValue(head.object.sha === context.expectedHead, 'stale_head')
@@ -303,7 +339,7 @@ export async function publishImplementation(
       date: context.commitDate,
     }
     const commit = await api('POST', '/git/commits', {
-      message: result.message,
+      message: result.message + '\n',
       tree: tree.sha,
       parents: [parent],
       author: identity,
@@ -331,6 +367,11 @@ export async function publishImplementation(
       }
       await checkpoint(receipt)
       requireValue((await api('GET', refPath))?.object.sha === commitSha, 'stale_head')
+      if (single && existing)
+        requireValue(
+          existing.head.sha === commitSha && existing.head.repo?.full_name === repository,
+          'pr_ownership',
+        )
       const body = [
         `Исходное обращение: #${context.source}; спецификация: #${context.spec}.`,
         `Согласование: https://github.com/${repository}/issues/${context.source}#issuecomment-${context.approval}`,
@@ -374,6 +415,8 @@ export async function publishImplementation(
       'origin',
       'checks',
       'context',
+      'initial_timeout',
+      'initial_rerun',
       'result',
       'verification',
       'approval',
@@ -412,6 +455,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'X-GitHub-Api-Version': '2022-11-28',
       },
       ...(data ? { body: JSON.stringify(data) } : {}),
+      signal: AbortSignal.timeout(30000),
     })
     if (response.status === 404 && path.startsWith('/git/ref/heads/')) return null
     if (!response.ok) throw new Error('github_api')
@@ -419,6 +463,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (value.errors) throw new Error('github_api')
     return value
   }
+  let candidateSha
   try {
     const trust = {
       trustedSha: process.env.TRUSTED_SHA,
@@ -433,12 +478,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       trust.previousRunId = Number(process.env.PREVIOUS_RUN_ID)
     }
     if (process.env.RECOVERY_ARTIFACT_ID) trust.recovery = await read('recovery', 'publication')
-    await publishImplementation(
-      await read('result'),
-      await read('context'),
-      api,
-      trust,
-      (receipt) => writeFile(`${directory}/publication.json`, JSON.stringify(receipt)),
+    const result = await read('result')
+    candidateSha = result.candidateSha
+    await publishImplementation(result, await read('context'), api, trust, (receipt) =>
+      writeFile(`${directory}/publication.json`, JSON.stringify(receipt)),
     )
   } catch (error) {
     console.error(
@@ -447,6 +490,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         state: error.state ?? 'unknown',
       }),
     )
+    if (process.env.INITIAL_IO && process.env.GITHUB_STEP_SUMMARY) {
+      const diagnostic = JSON.stringify({
+        stage: 'publish',
+        category: error.state ? error.message : 'input',
+        base: shaPattern.test(process.env.TRUSTED_SHA) ? process.env.TRUSTED_SHA : null,
+        sha: shaPattern.test(candidateSha) ? candidateSha : null,
+        state: error.state ?? 'unknown',
+      })
+      await writeFile(`${directory}/publish-diagnostic.json`, diagnostic)
+      await appendFile(process.env.GITHUB_STEP_SUMMARY, `Initial implementation: ${diagnostic}\n`)
+    }
     process.exitCode = 1
   }
 }

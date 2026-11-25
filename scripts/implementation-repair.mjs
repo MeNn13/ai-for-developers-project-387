@@ -1,15 +1,15 @@
-﻿import { appendFile, readFile, writeFile, mkdir } from 'node:fs/promises'
+import { appendFile, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import config from '../.github/opencode/opencode.json' with { type: 'json' }
 import { unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
-import { admit } from './implementation-admission.mjs'
+import { admit, AdmissionFailure } from './implementation-admission.mjs'
 import { allowedFile, allowedPath, existingDocument } from './implementation-publish.mjs'
 import { prepare } from './opencode.mjs'
 import { trustedOrigin } from './implementation-origin.mjs'
-import { decodeModel } from './implementation-model-output.mjs'
+import { decodeModel, ImplementationFailure } from './implementation-model-output.mjs'
 import {
   generated,
   InvalidResult,
@@ -82,7 +82,7 @@ export async function repairContext(eventName, event, previous, original, github
     trustedSha: trust.trustedSha,
     base: trust.trustedSha,
     expectedHead: pr.head.sha,
-    commitDate: new Date().toISOString().replace(/\.\d{3}Z$/, ''),
+    commitDate: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     repair: { number: pr.number, eventName, event, previousRunId: previous.publisherRunId },
   }
   return {
@@ -174,15 +174,13 @@ async function main() {
       appId: Number(process.env.PUBLISH_APP_BOT_ID),
       trustedSha: process.env.TRUSTED_SHA,
     })
-    await appendFile(
-      process.env.GITHUB_OUTPUT,
-      `allowed=${decision.allowed}\nreason=${decision.reason}\n`,
-    )
+    let output = `allowed=${decision.allowed}\nreason=${decision.reason}\n`
     if (decision.allowed) {
       const match = event.comment.body.match(/^\s*\/(?:oc|opencode)\s+fix\s+([1-9]\d*)\b/i)
       check(match && Number.isSafeInteger(Number(match[1])))
-      await appendFile(process.env.GITHUB_OUTPUT, `previous=${match[1]}\nhead=${decision.head}\n`)
+      output += `previous=${match[1]}\nhead=${decision.head}\n`
     }
+    await appendFile(process.env.GITHUB_OUTPUT, output)
   } else if (command === 'recovery') {
     const artifact = await recoveryArtifact(api, Number(process.env.GITHUB_RUN_ID))
     if (artifact) await appendFile(process.env.GITHUB_OUTPUT, `artifact=${artifact}\n`)
@@ -258,6 +256,13 @@ async function main() {
     if (reply.files.some((f) => f.path === 'contract/main.tsp')) {
       // Invoke the same project-owned generator as mise run generate, using pinned Node.
       const generation = spawnSync(process.execPath, ['scripts/generate.mjs'], { stdio: 'ignore' })
+      if (
+        generation.status !== 0 &&
+        context.initial &&
+        !context.repair &&
+        context.phase === 'single'
+      )
+        throw new Error('generation_failed')
       check(generation.status === 0)
       const generatedPaths = git(['diff', '--name-only']).split('\n').filter(generated)
       const untracked = git(['ls-files', '--others', '--exclude-standard'])
@@ -322,13 +327,27 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
   main().catch(async (error) => {
     const phase = process.argv[2]
-    if (error instanceof InvalidResult && ['model', 'candidate'].includes(phase)) {
-      const diagnostic = `repair_failed phase=${phase} operation=validate category=invalid_result ${error.message}`
+    let diagnostic
+    if (phase === 'gate') {
+      const category = error instanceof AdmissionFailure ? error.message : 'gate_error'
+      const rawAttempt = Number(process.env.GITHUB_RUN_ATTEMPT)
+      const rawSha = process.env.GITHUB_SHA
+      const attempt = Number.isSafeInteger(rawAttempt) && rawAttempt > 0 ? rawAttempt : 'unknown'
+      const sha = rawSha?.length === 40 && /^[a-f0-9]{40}$/.test(rawSha) ? rawSha : 'unknown'
+      diagnostic = `repair_failed phase=gate operation=admit category=${category} attempt=${attempt} sha=${sha}`
+    } else if (phase === 'model' && error instanceof ImplementationFailure) {
+      const status = error.status === undefined ? '' : ` status=${error.status}`
+      diagnostic = `repair_failed phase=model operation=model category=${error.message}${status}`
+    } else if (error instanceof InvalidResult && ['model', 'candidate'].includes(phase)) {
+      diagnostic = `repair_failed phase=${phase} operation=validate category=invalid_result ${error.message}`
+    }
+    if (diagnostic) {
       console.error(process.env.GITHUB_ACTIONS ? `::error::${diagnostic}` : diagnostic)
       if (process.env.GITHUB_STEP_SUMMARY)
         await appendFile(process.env.GITHUB_STEP_SUMMARY, diagnostic + '\n').catch(() =>
           console.error('repair_summary_unavailable'),
         )
-    } else console.error('repair_failed')
+    } else
+      console.error(error.message === 'generation_failed' ? 'generation_failed' : 'repair_failed')
     process.exitCode = 1
   })

@@ -79,6 +79,7 @@ function fixture() {
         head_branch: 'main',
         repository: { full_name: 'MeNn13/ai-for-developers-project-387' },
         conclusion: 'success',
+        event: 'workflow_dispatch',
         run_attempt: 1,
       }
     if (path === '/actions/runs/7/jobs?per_page=100')
@@ -116,7 +117,11 @@ function fixture() {
         node_id: 'PR_50',
         draft: true,
         user: { id: 123 },
-        head: { ref: 'spec/38', sha: head },
+        head: {
+          ref: 'spec/38',
+          sha: head,
+          repo: { full_name: 'MeNn13/ai-for-developers-project-387' },
+        },
         base: { ref: 'main' },
       }
       return pr
@@ -143,6 +148,10 @@ test('prepared implementation creates an App draft PR without executing result c
   const receipt = await publishImplementation(result, context, f.api, trust())
   assert.equal(receipt.head, next)
   assert.equal(receipt.pr, 50)
+  assert.equal(
+    f.calls.find((c) => c.path === '/git/commits' && c.method === 'POST').data.message,
+    result.message + '\n',
+  )
   assert.equal(f.calls.find((c) => c.path === '/git/refs').data.ref, 'refs/heads/spec/38')
   assert.match(
     f.calls.find((c) => c.path === '/pulls' && c.method === 'POST').data.body,
@@ -260,15 +269,123 @@ test('initial in-progress producer publishes first draft and requires final chec
   await publishImplementation(ready, finished, github, finalTrust)
   assert.equal(readyCalls.length, 1)
   assert.match(readyCalls[0].query, /markPullRequestReadyForReview/)
-  await assert.rejects(
-    publishImplementation(
-      { ...draft, contextDigest: digest({ ...initial, deadline: 0 }) },
-      { ...initial, deadline: 0 },
-      github,
-      trusted,
-    ),
-    /context/,
+})
+
+test('initial publisher reports deadline and rerun refusals before any writes', async () => {
+  for (const [deadline, runAttempt, reason] of [
+    [0, 1, 'initial_timeout'],
+    [Number.MAX_SAFE_INTEGER, 2, 'initial_rerun'],
+  ]) {
+    const initial = { ...context, initial: true, phase: 'first', deadline }
+    const calls = []
+    const api = async (method, path) => {
+      calls.push({ method, path })
+      return { run_attempt: runAttempt }
+    }
+    await assert.rejects(publishImplementation(result, initial, api, trust()), {
+      message: reason,
+      state: 'none',
+    })
+    assert.deepEqual(calls, [{ method: 'GET', path: '/actions/runs/7' }])
+  }
+})
+
+test('one verified specification publishes ready once and repairs an interrupted Ready operation', async () => {
+  const f = fixture()
+  const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
+  let conclusion = null
+  let verified = false
+  let duplicate = false
+  let markReady = 0
+  const github = async (method, path, data) => {
+    if (path === '/actions/runs/7')
+      return {
+        ...(await f.api(method, path, data)),
+        status: conclusion ? 'completed' : 'in_progress',
+        conclusion,
+      }
+    if (path === '/issues/38/sub_issues?per_page=100') return [{ number: 40 }, { number: 41 }]
+    if (path === '/issues/40/dependencies/blocked_by?per_page=100') return []
+    if (path === '/issues/41/dependencies/blocked_by?per_page=100')
+      return [{ number: 40, state: 'open' }]
+    if (path === '/issues/41') return { body: 'dependent ticket' }
+    if (path.endsWith('/jobs?per_page=100')) {
+      const jobs = [
+        { name: 'implementation-context', conclusion: 'success' },
+        { name: 'implementation-check', conclusion: verified ? 'success' : 'failure' },
+      ]
+      if (duplicate) jobs.push({ ...jobs[1], conclusion: 'failure' })
+      return { total_count: jobs.length, jobs }
+    }
+    if (path === '/graphql') {
+      assert.match(data.query, /markPullRequestReadyForReview/)
+      if (++markReady === 1) throw new Error('connection lost')
+      return {}
+    }
+    return f.api(method, path, data)
+  }
+  const initial = {
+    ...context,
+    initial: true,
+    phase: 'single',
+    deadline: Date.now() + 60000,
+    tickets: [40, 41],
+    order: [40, 41],
+    graph: [
+      { number: 40, blockedBy: [] },
+      { number: 41, blockedBy: [40] },
+    ],
+    snapshots: [...context.snapshots, { number: 41, body: 'dependent ticket' }],
+  }
+  const ready = {
+    ...result,
+    ready: true,
+    contextDigest: digest(initial),
+    files: [
+      ...result.files,
+      { path: 'frontend/src/followup.ts', mode: '100644', content: 'export {}\n' },
+    ],
+  }
+  const trusted = {
+    ...trust(),
+    publisherRunId: 7,
+    verification: { ...trust().verification, ready: true, resultDigest: digest(ready) },
+  }
+  await assert.rejects(publishImplementation(ready, initial, github, trusted), /checks/)
+  verified = true
+  duplicate = true
+  await assert.rejects(publishImplementation(ready, initial, github, trusted), /checks/)
+  duplicate = false
+  f.setHead('d'.repeat(40))
+  await assert.rejects(publishImplementation(ready, initial, github, trusted), /branch_ownership/)
+  f.setHead(null)
+  assert.equal(
+    f.calls.some(({ method }) => method === 'POST'),
+    false,
   )
+  let receipt
+  await assert.rejects(
+    publishImplementation(ready, initial, github, trusted, (value) => {
+      receipt = { ...value }
+    }),
+    /github_api/,
+  )
+  assert.equal(receipt.pr, 50)
+  assert.equal(receipt.head, next)
+  conclusion = 'failure'
+  const recovered = await publishImplementation(ready, initial, github, {
+    ...trusted,
+    publisherRunId: 8,
+    previous: receipt,
+    previousRunId: 7,
+  })
+  assert.equal(recovered.pr, receipt.pr)
+  assert.equal(recovered.version, 1)
+  assert.equal(markReady, 2)
+  assert.equal(f.calls.filter(({ path }) => path === '/git/commits').length, 1)
+  const prs = f.calls.filter(({ path }) => path === '/pulls')
+  assert.equal(prs.length, 1)
+  assert.match(prs[0].data.body, /Closes #40\nCloses #41/)
 })
 
 test('rejects protected files, deletion, rename targets, symlinks and path bypass before writes', async () => {

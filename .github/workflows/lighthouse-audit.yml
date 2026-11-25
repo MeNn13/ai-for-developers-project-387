@@ -1,0 +1,166 @@
+name: Lighthouse audit
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+      timezone: Europe/Moscow
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Audit the deployed application or use the training report
+        type: choice
+        options: [live, training]
+        default: live
+
+permissions: {}
+
+concurrency:
+  group: lighthouse-audit
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: >-
+      github.ref_name == github.event.repository.default_branch && github.ref_type == 'branch' &&
+      (github.event_name != 'schedule' || (vars.APP_URL != '' && vars.AUDIT_STATUS_ISSUE != ''))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      available: ${{ steps.collect.outputs.available }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+      - name: Collect Lighthouse report
+        id: collect
+        run: node scripts/lighthouse-audit-cli.mjs collect
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          AUDIT_MODE: ${{ inputs.mode || 'live' }}
+          AUDIT_DIR: ${{ runner.temp }}/lighthouse-report
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lighthouse-report
+          path: ${{ runner.temp }}/lighthouse-report
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+      - name: Record collection failure
+        if: failure()
+        run: echo 'Не удалось подготовить или загрузить отчёт Lighthouse. Подробности доступны в журнале сбора.' >> "$GITHUB_STEP_SUMMARY"
+
+  analyze:
+    needs: collect
+    if: needs.collect.outputs.available == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: lighthouse-report
+          path: ${{ runner.temp }}/lighthouse-report
+      - name: Install pinned OpenCode CLI
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/anomalyco/opencode/releases/download/v2.2.3/opencode-linux-x64.tar.gz \
+            --output "$RUNNER_TEMP/opencode.tar.gz"
+          echo "ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35  $RUNNER_TEMP/opencode.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/opencode-bin"
+          tar -xzf "$RUNNER_TEMP/opencode.tar.gz" -C "$RUNNER_TEMP/opencode-bin"
+          echo "$RUNNER_TEMP/opencode-bin" >> "$GITHUB_PATH"
+          sudo mkdir -p /etc/opencode
+          jq '.update = "disable" |
+            .permissions = [{action:"*", resource:"*", effect:"deny"}] |
+            .providers["cloudflare-workers-ai"].settings.apiKey = "{env:CLOUDFLARE_API_KEY}" |
+            .policies |= (map(select(.action != "tool.use" or .effect == "deny")) +
+              [{action:"provider.use", resource:"google", effect:"allow"},
+               {action:"provider.use", resource:"cloudflare-workers-ai", effect:"allow"}])' \
+            .github/opencode/opencode.json | sudo tee /etc/opencode/opencode.json > /dev/null
+      - name: Analyze report with OpenCode
+        run: node scripts/lighthouse-audit-cli.mjs analyze
+        env:
+          AUDIT_DIR: ${{ runner.temp }}/lighthouse-report
+          AUDIT_RESULT_DIR: ${{ runner.temp }}/lighthouse-analysis
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lighthouse-analysis
+          path: ${{ runner.temp }}/lighthouse-analysis/analysis.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+      - name: Record analysis failure
+        if: failure()
+        run: echo 'OpenCode не подготовил подтверждённый вывод. Отчёт доступен в артефакте lighthouse-report.' >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: [collect, analyze]
+    if: >-
+      !cancelled() && needs.collect.result == 'success' &&
+      (needs.collect.outputs.available == 'false' || needs.analyze.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: lighthouse-report
+          path: ${{ runner.temp }}/lighthouse-report
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.analyze.result == 'success'
+        with:
+          name: lighthouse-analysis
+          path: ${{ runner.temp }}/lighthouse-analysis
+      - name: Publish audit outcome
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          AUDIT_STATUS_ISSUE: ${{ vars.AUDIT_STATUS_ISSUE }}
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const path = require('node:path');
+            const { pathToFileURL } = require('node:url');
+            const { publishAudit, readAuditReport } = await import(pathToFileURL(path.resolve('scripts/lighthouse-audit.mjs')).href);
+            const read = async (folder, file) => JSON.parse(await fs.readFile(path.join(process.env.RUNNER_TEMP, folder, file), 'utf8'));
+            const collection = await read('lighthouse-report', 'collection.json');
+            const report = collection.unavailable ? collection : readAuditReport(await read('lighthouse-report', 'lighthouse.json'), collection.mode, collection.url);
+            const result = collection.unavailable ? null : await read('lighthouse-analysis', 'analysis.json');
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${context.runId}`;
+            const api = {
+              listIssues: () => github.paginate(github.rest.issues.listForRepo, { ...context.repo, state: 'all', per_page: 100 }),
+              createIssue: async (issue) => (await github.rest.issues.create({ ...context.repo, ...issue })).data,
+              listStatusComments: (issue_number) => github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number, per_page: 100 }),
+              createStatusComment: (issue_number, body) => github.rest.issues.createComment({ ...context.repo, issue_number, body }),
+            };
+            try {
+              const outcome = await publishAudit(report, result, api, { runUrl, statusIssue: Number(process.env.AUDIT_STATUS_ISSUE) });
+              await core.summary.addRaw(outcome, true).write();
+              if (collection.unavailable) core.setFailed('Нет данных для анализа Lighthouse.');
+            } catch (error) {
+              await core.summary.addRaw('Не удалось опубликовать результат аудита. Исходные данные доступны в lighthouse-report.', true).write();
+              throw error;
+            }

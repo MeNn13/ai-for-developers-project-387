@@ -53,7 +53,7 @@ jobs:
           printf '%s\n' "INITIAL_IO=$RUNNER_TEMP/initial" "INITIAL_CANDIDATE_ROOT=$RUNNER_TEMP/candidate" "PUBLISH_IO=$RUNNER_TEMP/initial" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - id: base
@@ -70,12 +70,26 @@ jobs:
           name: implementation-context
           path: ${{ runner.temp }}/initial/context.json
           retention-days: 7
+      - name: Record admission failure
+        if: failure()
+        env:
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/initial"
+          printf '{"stage":"context","category":"admission_failed","base":"%s","sha":null}\n' "$BASE_SHA" > "$RUNNER_TEMP/initial/diagnostic.json"
+          cat "$RUNNER_TEMP/initial/diagnostic.json" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure()
+        with:
+          name: initial-context-diagnostic
+          path: ${{ runner.temp }}/initial/diagnostic.json
+          retention-days: 7
 
-  first:
+  check:
     name: implementation-check
     needs: [context]
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 65
     permissions:
       contents: read
       actions: read
@@ -99,13 +113,12 @@ jobs:
         shell: bash
         run: |
           head=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.INITIAL_IO+"/context.json")).expectedHead')
-          git fetch origin "$head"
           git worktree add --detach "$INITIAL_CANDIDATE_ROOT" "$head"
           mise trust "$INITIAL_CANDIDATE_ROOT/mise.toml"
           cd "$INITIAL_CANDIDATE_ROOT"
           mise run install
           mise exec -- npx playwright install --with-deps --only-shell chromium
-      - name: Install pinned read-only model and isolation
+      - name: Install pinned OpenCode and isolation
         shell: bash
         run: |
           bash "$GITHUB_WORKSPACE/scripts/install-implementation-sandbox.sh"
@@ -113,33 +126,35 @@ jobs:
           echo "ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35  $RUNNER_TEMP/opencode.tar.gz" | sha256sum --check
           mkdir -p "$RUNNER_TEMP/opencode-bin"
           tar -xzf "$RUNNER_TEMP/opencode.tar.gz" -C "$RUNNER_TEMP/opencode-bin"
-          echo "$RUNNER_TEMP/opencode-bin" >> "$GITHUB_PATH"
-          sudo mkdir -p /etc/opencode
-          jq '.update = "disable"' .github/opencode/opencode.json | sudo tee /etc/opencode/opencode.json > /dev/null
-      - name: Execute dependency graph and verify exact integration commits
+      - name: Implement entire specification and verify exact commit
         id: graph
         continue-on-error: true
-        run: node scripts/implementation-graph.mjs first
+        run: node scripts/implementation-graph.mjs
         env:
+          OPENCODE_BIN: ${{ runner.temp }}/opencode-bin/opencode
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
       - name: initial-timeout
         if: steps.graph.outputs.reason == 'timeout'
         run: echo 'Initial deadline reached'
-      - name: Reject unsuccessful graph
-        if: steps.graph.outcome != 'success'
+      - name: Record failure diagnostic
+        if: failure() || steps.graph.outcome == 'failure'
         env:
-          GRAPH_DIAGNOSTIC: ${{ steps.graph.outputs.diagnostic }}
+          BASE_SHA: ${{ needs.context.outputs.sha }}
         run: |
-          diagnostic="${GRAPH_DIAGNOSTIC:-Graph diagnostic unavailable}"
-          printf '::error::%s\n' "$diagnostic"
-          printf '%s\n' "$diagnostic" >> "$GITHUB_STEP_SUMMARY"
-          exit 1
+          if [[ ! -f "$INITIAL_IO/diagnostic.json" ]]; then
+            mkdir -p "$INITIAL_IO"
+            printf '{"stage":"setup","category":"setup_failed","base":"%s","sha":null}\n' "$BASE_SHA" > "$INITIAL_IO/diagnostic.json"
+            cat "$INITIAL_IO/diagnostic.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure() || steps.graph.outcome == 'failure'
         with:
-          overwrite: true
-          name: implementation-context
-          path: ${{ runner.temp }}/initial/context.json
+          name: initial-check-diagnostic
+          path: ${{ runner.temp }}/initial/diagnostic.json
           retention-days: 7
+      - name: Reject unsuccessful implementation
+        if: steps.graph.outcome != 'success'
+        run: exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           overwrite: true
@@ -152,18 +167,10 @@ jobs:
           name: implementation-verification
           path: ${{ runner.temp }}/initial/verification.json
           retention-days: 7
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          overwrite: true
-          name: initial-first-evidence
-          path: |
-            ${{ runner.temp }}/initial/integrations.json
-            ${{ runner.temp }}/initial/result.json
-          retention-days: 7
 
-  publish-first:
+  publish:
     name: initial-publish-spec-${{ needs.context.outputs.spec }}
-    needs: [context, first]
+    needs: [context, check]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: implementation-publisher
@@ -198,7 +205,7 @@ jobs:
           PUBLISH_APP_ID: ${{ vars.PUBLISH_APP_ID }}
           PUBLISH_INSTALLATION_ID: ${{ vars.PUBLISH_INSTALLATION_ID }}
           PUBLISH_APP_PRIVATE_KEY: ${{ secrets.PUBLISH_APP_PRIVATE_KEY }}
-      - name: Publish first draft with trusted App operations
+      - name: Publish verified specification with trusted App operations
         run: node scripts/implementation-publish.mjs
         env:
           TRUSTED_SHA: ${{ needs.context.outputs.sha }}
@@ -207,170 +214,22 @@ jobs:
       - name: Revoke installation token
         if: always() && steps.installation.outcome == 'success'
         run: node scripts/implementation-app.mjs revoke
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          overwrite: true
-          name: implementation-publication
-          path: ${{ runner.temp }}/initial/publication.json
-          if-no-files-found: ignore
-          retention-days: 7
-
-  final:
-    name: implementation-final-check
-    needs: [context, publish-first]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      actions: read
-      issues: read
-    steps:
-      - name: Configure runtime paths
-        run: |
-          printf '%s\n' "INITIAL_IO=$RUNNER_TEMP/initial" "INITIAL_CANDIDATE_ROOT=$RUNNER_TEMP/candidate" "PUBLISH_IO=$RUNNER_TEMP/initial" >> "$GITHUB_ENV"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ needs.context.outputs.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: implementation-context
-          path: ${{ runner.temp }}/initial
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: initial-first-evidence
-          path: ${{ runner.temp }}/initial
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: implementation-publication
-          path: ${{ runner.temp }}/initial
-      - name: Revalidate consent and rebind published parent
-        run: node scripts/implementation-initial.mjs rebind
+      - name: Record publication failure
+        if: failure()
         env:
-          GH_TOKEN: ${{ github.token }}
-          TRUSTED_SHA: ${{ needs.context.outputs.sha }}
-      - name: Install pinned toolchain
-        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d
-      - name: Prepare isolated candidate worktree
-        shell: bash
+          BASE_SHA: ${{ needs.context.outputs.sha }}
         run: |
-          head=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.INITIAL_IO+"/context.json")).expectedHead')
-          git fetch origin "$head"
-          git worktree add --detach "$INITIAL_CANDIDATE_ROOT" "$head"
-          mise trust "$INITIAL_CANDIDATE_ROOT/mise.toml"
-          cd "$INITIAL_CANDIDATE_ROOT"
-          mise run install
-          mise exec -- npx playwright install --with-deps --only-shell chromium
-      - name: Install pinned read-only model and isolation
-        shell: bash
-        run: |
-          bash "$GITHUB_WORKSPACE/scripts/install-implementation-sandbox.sh"
-          curl --fail --silent --show-error --location https://github.com/anomalyco/opencode/releases/download/v2.2.3/opencode-linux-x64.tar.gz --output "$RUNNER_TEMP/opencode.tar.gz"
-          echo "ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35  $RUNNER_TEMP/opencode.tar.gz" | sha256sum --check
-          mkdir -p "$RUNNER_TEMP/opencode-bin"
-          tar -xzf "$RUNNER_TEMP/opencode.tar.gz" -C "$RUNNER_TEMP/opencode-bin"
-          echo "$RUNNER_TEMP/opencode-bin" >> "$GITHUB_PATH"
-          sudo mkdir -p /etc/opencode
-          jq '.update = "disable"' .github/opencode/opencode.json | sudo tee /etc/opencode/opencode.json > /dev/null
-      - name: Execute dependency graph and verify exact integration commits
-        id: graph
-        continue-on-error: true
-        run: node scripts/implementation-graph.mjs final
-        env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-      - name: initial-timeout
-        if: steps.graph.outputs.reason == 'timeout'
-        run: echo 'Initial deadline reached'
-      - name: Reject unsuccessful graph
-        if: steps.graph.outcome != 'success'
-        env:
-          GRAPH_DIAGNOSTIC: ${{ steps.graph.outputs.diagnostic }}
-        run: |
-          diagnostic="${GRAPH_DIAGNOSTIC:-Graph diagnostic unavailable}"
-          printf '::error::%s\n' "$diagnostic"
-          printf '%s\n' "$diagnostic" >> "$GITHUB_STEP_SUMMARY"
-          exit 1
+          if [[ ! -f "$PUBLISH_IO/publish-diagnostic.json" ]]; then
+            mkdir -p "$PUBLISH_IO"
+            printf '{"stage":"publish","category":"setup_failed","base":"%s","sha":null}\n' "$BASE_SHA" > "$PUBLISH_IO/publish-diagnostic.json"
+            cat "$PUBLISH_IO/publish-diagnostic.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure()
         with:
-          overwrite: true
-          name: implementation-context
-          path: ${{ runner.temp }}/initial/context.json
+          name: initial-publish-diagnostic
+          path: ${{ runner.temp }}/initial/publish-diagnostic.json
           retention-days: 7
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          overwrite: true
-          name: implementation-result
-          path: ${{ runner.temp }}/initial/result.json
-          retention-days: 7
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          overwrite: true
-          name: implementation-verification
-          path: ${{ runner.temp }}/initial/verification.json
-          retention-days: 7
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          overwrite: true
-          name: initial-final-evidence
-          path: |
-            ${{ runner.temp }}/initial/integrations.json
-            ${{ runner.temp }}/initial/result.json
-            ${{ runner.temp }}/initial/review-*.json
-          retention-days: 7
-
-  publish-final:
-    name: initial-publish-spec-${{ needs.context.outputs.spec }}
-    needs: [context, final]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    environment: implementation-publisher
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - name: Configure runtime paths
-        run: |
-          printf '%s\n' "INITIAL_IO=$RUNNER_TEMP/initial" "INITIAL_CANDIDATE_ROOT=$RUNNER_TEMP/candidate" "PUBLISH_IO=$RUNNER_TEMP/initial" >> "$GITHUB_ENV"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ needs.context.outputs.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: implementation-context
-          path: ${{ runner.temp }}/initial/context
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: implementation-result
-          path: ${{ runner.temp }}/initial/result
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: implementation-verification
-          path: ${{ runner.temp }}/initial/verification
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: implementation-publication
-          path: ${{ runner.temp }}/initial/previous
-      - name: Mint repository-scoped installation token
-        id: installation
-        run: node scripts/implementation-app.mjs
-        env:
-          PUBLISH_APP_ID: ${{ vars.PUBLISH_APP_ID }}
-          PUBLISH_INSTALLATION_ID: ${{ vars.PUBLISH_INSTALLATION_ID }}
-          PUBLISH_APP_PRIVATE_KEY: ${{ secrets.PUBLISH_APP_PRIVATE_KEY }}
-      - name: Publish ready graph with trusted App operations
-        run: node scripts/implementation-publish.mjs
-        env:
-          TRUSTED_SHA: ${{ needs.context.outputs.sha }}
-          SOURCE_RUN_ID: ${{ github.run_id }}
-          PUBLISH_APP_BOT_ID: ${{ vars.PUBLISH_APP_BOT_ID }}
-          PREVIOUS_RUN_ID: ${{ github.run_id }}
-      - name: Revoke installation token
-        if: always() && steps.installation.outcome == 'success'
-        run: node scripts/implementation-app.mjs revoke
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

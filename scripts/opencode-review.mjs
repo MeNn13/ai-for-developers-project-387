@@ -18,9 +18,6 @@ export function eligible(pr, repository, app = {}) {
   )
 }
 
-const criteria =
-  'Свободные слоты: start > now; пересечения интервалов запрещены; атомарность бронирования при конкуренции. Сетка стартов каждые 30 минут; рабочие часы Пн–Пт 10:00–18:00 Europe/Moscow; окно записи 14 календарных дней. Проверить затронутые сценарии гостя и владельца.'
-
 export async function prepareReview(pr, repository, api) {
   const comments = await pages(api, `/issues/${pr.number}/comments`)
   const context = {
@@ -31,7 +28,7 @@ export async function prepareReview(pr, repository, api) {
     title: pr.title,
     body: pr.body,
     comments,
-    criteria,
+    criteria: await readFile(new URL('../REVIEW.md', import.meta.url), 'utf8'),
     related: await relatedIssues({ ...pr, comments }, repository, api),
     diff: await api(`/pulls/${pr.number}`, 'application/vnd.github.diff'),
     reviews: await pages(api, `/pulls/${pr.number}/reviews`),

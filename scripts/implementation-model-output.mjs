@@ -5,7 +5,7 @@ export class ImplementationFailure extends Error {
   }
 }
 
-export function decodeModel(child, bounded = false) {
+export function decodeModel(child, bounded = false, structuredReply = true) {
   if (child.error?.code === 'ENOBUFS') throw new ImplementationFailure('model_output_limit')
   if (child.error || (bounded && [126, 127].includes(child.status)))
     throw new ImplementationFailure('model_launch')
@@ -72,6 +72,7 @@ export function decodeModel(child, bounded = false) {
   const final = [...messages.values()].at(-1)
   if (final?.reason !== 'stop' || final.text.length === 0)
     throw new ImplementationFailure('incomplete_stream')
+  if (!structuredReply) return
   try {
     return JSON.parse(final.text.join(''))
   } catch {

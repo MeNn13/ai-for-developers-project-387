@@ -22,7 +22,10 @@ export async function initialCompletion(run, api, appId, trustedSha) {
   const marker = jobs.jobs.flatMap((j) => j.steps ?? [])
   const ready = marker.some(
     (s) =>
-      s.name === 'Publish ready graph with trusted App operations' && s.conclusion === 'success',
+      [
+        'Publish ready graph with trusted App operations',
+        'Publish verified specification with trusted App operations',
+      ].includes(s.name) && s.conclusion === 'success',
   )
   const reason =
     run.conclusion === 'cancelled'

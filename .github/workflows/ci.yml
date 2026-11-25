@@ -42,12 +42,10 @@ jobs:
           mise run install
           mise exec -- npx playwright install --with-deps --only-shell chromium
           bash "$GITHUB_WORKSPACE/scripts/install-implementation-sandbox.sh"
-      - name: Exercise first ticket through the Linux sandbox
+      - name: Exercise both dependent tickets through the Linux sandbox
         env:
           INITIAL_CANDIDATE_ROOT: ${{ runner.temp }}/candidate
-        run: |
-          chmod +x scripts/check-implementation-ci.mjs
-          mise run test:implementation-ci
+        run: mise run test:implementation-ci
 
   windows-worktrees:
     runs-on: windows-2025
