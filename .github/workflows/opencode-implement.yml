@@ -64,7 +64,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TRUSTED_SHA: ${{ steps.base.outputs.sha }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           overwrite: true
           name: implementation-context
@@ -78,7 +78,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/initial"
           printf '{"stage":"context","category":"admission_failed","base":"%s","sha":null}\n' "$BASE_SHA" > "$RUNNER_TEMP/initial/diagnostic.json"
           cat "$RUNNER_TEMP/initial/diagnostic.json" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: failure()
         with:
           name: initial-context-diagnostic
@@ -103,12 +103,12 @@ jobs:
           ref: ${{ needs.context.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: implementation-context
           path: ${{ runner.temp }}/initial
       - name: Install pinned toolchain
-        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d
+        uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d
       - name: Prepare isolated candidate worktree
         shell: bash
         run: |
@@ -146,7 +146,7 @@ jobs:
             printf '{"stage":"setup","category":"setup_failed","base":"%s","sha":null}\n' "$BASE_SHA" > "$INITIAL_IO/diagnostic.json"
             cat "$INITIAL_IO/diagnostic.json" >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: failure() || steps.graph.outcome == 'failure'
         with:
           name: initial-check-diagnostic
@@ -155,13 +155,13 @@ jobs:
       - name: Reject unsuccessful implementation
         if: steps.graph.outcome != 'success'
         run: exit 1
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           overwrite: true
           name: implementation-result
           path: ${{ runner.temp }}/initial/result.json
           retention-days: 7
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           overwrite: true
           name: implementation-verification
@@ -186,15 +186,15 @@ jobs:
           ref: ${{ needs.context.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: implementation-context
           path: ${{ runner.temp }}/initial/context
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: implementation-result
           path: ${{ runner.temp }}/initial/result
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: implementation-verification
           path: ${{ runner.temp }}/initial/verification
@@ -224,13 +224,13 @@ jobs:
             printf '{"stage":"publish","category":"setup_failed","base":"%s","sha":null}\n' "$BASE_SHA" > "$PUBLISH_IO/publish-diagnostic.json"
             cat "$PUBLISH_IO/publish-diagnostic.json" >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: failure()
         with:
           name: initial-publish-diagnostic
           path: ${{ runner.temp }}/initial/publish-diagnostic.json
           retention-days: 7
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           overwrite: true
