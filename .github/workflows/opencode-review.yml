@@ -56,7 +56,7 @@ jobs:
           sudo mkdir -p /etc/opencode
           # The trusted base may predate submit_reply while this PR changes the workflow.
           if [ -f scripts/opencode-config.mjs ]; then
-            node scripts/opencode-config.mjs
+            node scripts/opencode-config.mjs --review
           else
             jq '.update = "disable"' .github/opencode/opencode.json
           fi | sudo tee /etc/opencode/opencode.json > /dev/null
@@ -70,17 +70,26 @@ jobs:
           import { diagnosticFor } from './scripts/opencode-diagnostic.mjs';
           const directory = process.env.OPENCODE_IO;
           const publication = join(directory, 'publication');
+          const cloudflare = {
+            apiKey: process.env.CLOUDFLARE_API_KEY,
+            accountId: process.env.CLOUDFLARE_ACCOUNT_ID,
+          };
+          // An older trusted base ignores the option and inherits only the primary key.
+          delete process.env.CLOUDFLARE_API_KEY;
+          delete process.env.CLOUDFLARE_ACCOUNT_ID;
           try {
             await mkdir(publication, { recursive: true });
             await run(directory, {
               prompt: '.github/opencode/review-prompt.txt',
               title: 'Independent PR review',
+              cloudflare,
             });
             const { mode, repository, number, head } =
               JSON.parse(await readFile(join(directory, 'context.json'), 'utf8'));
             const reply = JSON.parse(await readFile(join(directory, 'reply.json'), 'utf8'));
             // The trusted base may predate the review-specific checks.
-            if (reply.publication !== null || reply.comment.includes(process.env.OPENCODE_API_KEY))
+            if (reply.publication !== null ||
+                [process.env.OPENCODE_API_KEY, cloudflare.apiKey].some(key => key && reply.comment.includes(key)))
               throw new Error('Review reply is not publishable.');
             await writeFile(join(publication, 'context.json'), JSON.stringify({ mode, repository, number, head }));
             await writeFile(join(publication, 'reply.json'), JSON.stringify({
@@ -100,6 +109,8 @@ jobs:
         env:
           OPENCODE_IO: ${{ runner.temp }}/review
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && !cancelled() && steps.context.outputs.allowed == 'true'
         with:

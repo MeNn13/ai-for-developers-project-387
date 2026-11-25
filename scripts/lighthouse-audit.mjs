@@ -1,59 +1,13 @@
 import { createHash } from 'node:crypto'
 import { decodeModel } from './implementation-model-output.mjs'
 
-const cloudflareModel = 'cloudflare-workers-ai/@cf/openai/gpt-oss-20b'
+import { cloudflareModel, providerFailure, retryableProviderErrors } from './opencode-provider.mjs'
 const geminiModel = 'google/gemini-3.1-flash-lite'
 const fallbackModels = [
   'opencode/hy4-flash-free',
   'opencode/mimo-v2.6-flash-free',
   'opencode/nemotron-3.5-lightning-free',
 ]
-const retryableProviderErrors = new Set([
-  'provider.no-route',
-  'provider.free-limit',
-  'provider.rate-limit',
-  'provider.internal',
-  'provider.transport',
-  'provider.timeout',
-])
-const otherProviderErrors = new Set([
-  'provider.auth',
-  'provider.quota',
-  'provider.invalid-request',
-  'provider.invalid-output',
-  'provider.unsupported-operation',
-  'permission.rejected',
-  'tool.execution',
-])
-
-function providerFailure(stdout) {
-  for (const line of (stdout ?? '').split(/\r?\n/)) {
-    let event
-    try {
-      event = JSON.parse(line)
-    } catch {
-      continue
-    }
-    if (event?.type !== 'error') continue
-    const { type, name, status, data } = event.error ?? {}
-    const category =
-      retryableProviderErrors.has(type) || otherProviderErrors.has(type)
-        ? type
-        : ['AgentNotFoundError', 'StepFailedError', 'APIError', 'ProviderAuthError'].includes(name)
-          ? name
-          : undefined
-    const responseStatus = status ?? data?.statusCode
-    return {
-      category,
-      status:
-        Number.isInteger(responseStatus) && responseStatus >= 100 && responseStatus <= 599
-          ? responseStatus
-          : undefined,
-    }
-  }
-  return {}
-}
-
 export function analyzeAuditWithModel(
   primary,
   invoke,

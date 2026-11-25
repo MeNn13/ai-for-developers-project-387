@@ -7,6 +7,7 @@ import { resolve, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { trustedHuman, triageEligible } from './opencode-publish.mjs'
 import { DiagnosticError, diagnosticFor } from './opencode-diagnostic.mjs'
+import { cloudflareModel, providerFailure, retryableReviewFailure } from './opencode-provider.mjs'
 
 // Only deliberate internal diagnostics may be printed in public logs.
 class WorkflowError extends Error {}
@@ -215,7 +216,7 @@ function resultText(stream, { requireText = true, onEvent = () => {} } = {}) {
   return text
 }
 
-export function resultReply(stream) {
+export function resultReply(stream, validateSubmission = () => {}) {
   let reply
   let sessionID
   let toolEvents = 0
@@ -238,6 +239,7 @@ export function resultReply(stream) {
       )
         throw new DiagnosticError('stream_json')
       validateSubmittedReply(part.state.input)
+      validateSubmission(part.state.input)
       const key = JSON.stringify([event.sessionID, part.messageID, part.id])
       if (calls.has(key) && !isDeepStrictEqual(calls.get(key), part.state.input))
         throw new DiagnosticError('submission_conflict')
@@ -283,39 +285,51 @@ export async function run(directory, options = {}) {
     throw new DiagnosticError('file_read')
   }
   if (mode !== 'triage') prompt += `\n\n${protocolInstruction({ review: mode === 'review' })}`
-  const child = spawn(
-    process.env.OPENCODE_BIN ?? 'opencode',
-    [
-      'run',
-      '--standalone',
-      '--format',
-      'json',
-      '--agent',
-      'discussion',
-      '--model',
-      config.model,
-      '--title',
-      options.title ?? 'GitHub discussion',
-    ],
-    { stdio: ['pipe', 'pipe', 'pipe'] },
-  )
-  child.stdin.on('error', () => {})
-  child.stdin.end(`${prompt}\n\nUntrusted GitHub context (JSON):\n${context}`)
-  let stream = ''
-  let bytes = 0
-  child.stdout.setEncoding('utf8')
-  child.stdout.on('data', (data) => {
-    bytes += Buffer.byteLength(data)
-    if (bytes > 2_000_000) child.kill()
-    else stream += data.toString('utf8')
-  })
-  // Provider output can contain request context; do not copy it to public logs.
-  child.stderr.resume()
-  const status = await new Promise((resolveExit, reject) => {
-    child.once('error', () => reject(new DiagnosticError('cli_start')))
-    child.once('close', resolveExit)
-  })
-  if (bytes > 2_000_000) throw new DiagnosticError('stream_limit')
+  const input = `${prompt}\n\nUntrusted GitHub context (JSON):\n${context}`
+  const { apiKey: cloudflareKey, accountId } = options.cloudflare ?? {}
+  const validateReview = (reply) => {
+    if (reply.publication !== null)
+      throw new DiagnosticError('reply_schema', {
+        rule: 'publication_kind',
+        field: 'publication',
+        reason: reply.publication === undefined ? 'missing' : 'invalid',
+      })
+    if ([apiKey, cloudflareKey].some((key) => key && reply.comment.includes(key)))
+      throw new DiagnosticError('reply_sensitive')
+  }
+  const invoke = (model) => {
+    if (mode !== 'review') return runModel(input, options.title, model)
+    const env = { ...process.env }
+    delete env.OPENCODE_API_KEY
+    delete env.CLOUDFLARE_API_KEY
+    delete env.CLOUDFLARE_ACCOUNT_ID
+    delete env.GEMINI_API_KEY
+    if (model === cloudflareModel) {
+      env.CLOUDFLARE_API_KEY = cloudflareKey
+      env.CLOUDFLARE_ACCOUNT_ID = accountId
+    } else {
+      env.OPENCODE_API_KEY = apiKey
+    }
+    return runModel(input, options.title, model, env)
+  }
+
+  let attempt = await invoke(config.model)
+  if (
+    mode === 'review' &&
+    cloudflareKey?.trim() &&
+    accountId?.trim() &&
+    retryableReviewFailure(providerFailure(attempt.stream))
+  ) {
+    try {
+      resultReply(attempt.stream, validateReview)
+    } catch (error) {
+      if (!['provider_rate', 'provider_error'].includes(diagnosticFor(error).code)) throw error
+      console.info('Independent review is retrying once with Cloudflare Workers AI.')
+      attempt = await invoke(cloudflareModel)
+    }
+  }
+
+  const { stream, status } = attempt
   if (status !== 0) {
     for (const line of stream.split(/\r?\n/)) {
       let event
@@ -335,21 +349,50 @@ export async function run(directory, options = {}) {
     if (comment.length > 50_000) throw new DiagnosticError('stream_limit')
     reply = { version: 1, comment, publication: null }
   } else {
-    reply = resultReply(stream)
-    if (mode === 'review' && reply.publication !== null)
-      throw new DiagnosticError('reply_schema', {
-        rule: 'publication_kind',
-        field: 'publication',
-        reason: reply.publication === undefined ? 'missing' : 'invalid',
-      })
-    if (mode === 'review' && reply.comment.includes(apiKey))
-      throw new DiagnosticError('reply_sensitive')
+    reply = resultReply(stream, mode === 'review' ? validateReview : undefined)
   }
   try {
     await writeFile(join(directory, 'reply.json'), JSON.stringify(reply))
   } catch {
     throw new DiagnosticError('file_write')
   }
+}
+
+async function runModel(input, title, model, env) {
+  const child = spawn(
+    process.env.OPENCODE_BIN ?? 'opencode',
+    [
+      'run',
+      '--standalone',
+      '--format',
+      'json',
+      '--agent',
+      'discussion',
+      '--model',
+      model,
+      '--title',
+      title ?? 'GitHub discussion',
+    ],
+    { env, stdio: ['pipe', 'pipe', 'pipe'] },
+  )
+  child.stdin.on('error', () => {})
+  child.stdin.end(input)
+  let stream = ''
+  let bytes = 0
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (data) => {
+    bytes += Buffer.byteLength(data)
+    if (bytes > 2_000_000) child.kill()
+    else stream += data.toString('utf8')
+  })
+  // Provider output can contain request context; do not copy it to public logs.
+  child.stderr.resume()
+  const status = await new Promise((resolveExit, reject) => {
+    child.once('error', () => reject(new DiagnosticError('cli_start')))
+    child.once('close', resolveExit)
+  })
+  if (bytes > 2_000_000) throw new DiagnosticError('stream_limit')
+  return { stream, status }
 }
 
 async function main() {

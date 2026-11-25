@@ -26,6 +26,18 @@ test('reply config adds only its plugin and narrow permissions without changing 
     { action: 'tool.use', resource: 'submit_reply:reply', effect: 'allow' },
   ])
   assert.equal(config.update, 'disable')
+  const review = spawnSync(process.execPath, ['scripts/opencode-config.mjs', '--review'], {
+    encoding: 'utf8',
+  })
+  assert.equal(review.status, 0)
+  assert.deepEqual(JSON.parse(review.stdout), {
+    ...config,
+    providers: { 'cloudflare-workers-ai': { settings: { apiKey: '{env:CLOUDFLARE_API_KEY}' } } },
+    policies: [
+      ...config.policies,
+      { action: 'provider.use', resource: 'cloudflare-workers-ai', effect: 'allow' },
+    ],
+  })
   for (const path of ['.github/workflows/opencode.yml', '.github/workflows/opencode-review.yml']) {
     const workflow = await readFile(path, 'utf8')
     assert.match(workflow, /node scripts\/opencode-config.mjs/)
@@ -41,7 +53,7 @@ const submission = (input = reply, id = 'call-1', status = 'completed') => ({
 })
 const stop = { type: 'step_finish', sessionID: 'session-1', part: { reason: 'stop' } }
 
-async function invoke(events, { status = 0, stale = false, mode, rawStream } = {}) {
+async function invoke(events, { status = 0, stale = false, mode, rawStream, review } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'opencode-submit-'))
   try {
     await writeFile(join(directory, 'context.json'), JSON.stringify({ mode }))
@@ -54,17 +66,33 @@ async function invoke(events, { status = 0, stale = false, mode, rawStream } = {
     await writeFile(
       loader,
       `
-      import { readFileSync } from 'node:fs';
+      import { appendFileSync, readFileSync } from 'node:fs';
       if (process.argv[1]?.endsWith('run')) {
-        process.stderr.write('fake-private-key');
+        const model = process.argv[process.argv.indexOf('--model') + 1];
+        const backup = model.startsWith('cloudflare-workers-ai/');
+        appendFileSync(new URL('./attempts.jsonl', import.meta.url), JSON.stringify({
+          model,
+          primaryKey: process.env.OPENCODE_API_KEY === 'fake-private-key',
+          cloudflareKey: process.env.CLOUDFLARE_API_KEY === 'fake-backup-key',
+          accountId: process.env.CLOUDFLARE_ACCOUNT_ID === 'fake-account',
+          geminiKey: Boolean(process.env.GEMINI_API_KEY),
+        }) + '\\n');
+        process.stderr.write('fake-private-key fake-backup-key raw-model-output');
         process.stdin.resume();
         await new Promise(() => process.stdin.on('end', () => {
-          process.stdout.write(readFileSync(new URL('./stream.jsonl', import.meta.url)), () => process.exit(${status}));
+          const stream = backup ? ${JSON.stringify((review?.backup ?? [submission(), stop]).map(JSON.stringify).join('\n'))}
+            : readFileSync(new URL('./stream.jsonl', import.meta.url));
+          process.stdout.write(stream, () => process.exit(backup ? ${review?.backupStatus ?? 0} : ${status}));
         }));
       }
     `,
     )
-    const result = spawnSync(process.execPath, ['scripts/opencode.mjs', 'run'], {
+    const workflow = review && (await readFile('.github/workflows/opencode-review.yml', 'utf8'))
+    const script = workflow?.match(/<<'NODE'\r?\n([\s\S]*?)\r?\n          NODE/)?.[1]
+    const args = review
+      ? ['--input-type=module', '--eval', script]
+      : ['scripts/opencode.mjs', 'run']
+    const result = spawnSync(process.execPath, args, {
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -72,6 +100,11 @@ async function invoke(events, { status = 0, stale = false, mode, rawStream } = {
         OPENCODE_BIN: process.execPath,
         OPENCODE_IO: directory,
         OPENCODE_API_KEY: 'fake-private-key',
+        ...(review && {
+          CLOUDFLARE_API_KEY: review.key ?? 'fake-backup-key',
+          CLOUDFLARE_ACCOUNT_ID: review.account ?? 'fake-account',
+          GEMINI_API_KEY: 'fake-gemini-key',
+        }),
       },
     })
     const read = async (name) => {
@@ -82,7 +115,21 @@ async function invoke(events, { status = 0, stale = false, mode, rawStream } = {
         throw error
       }
     }
-    assert.doesNotMatch(result.stdout + result.stderr, /fake-private-key/)
+    const output = result.stdout + result.stderr
+    assert.doesNotMatch(output, /fake-private-key|fake-backup-key|raw-model-output/)
+    if (review) {
+      const published = await read('publication/reply.json')
+      const diagnostic = await read('publication/diagnostic.json')
+      assert.doesNotMatch(
+        JSON.stringify({ published, diagnostic }),
+        /fake-private-key|fake-backup-key|raw-model-output/,
+      )
+      const attempts = (await readFile(join(directory, 'attempts.jsonl'), 'utf8'))
+        .trim()
+        .split('\n')
+        .map(JSON.parse)
+      return { status: result.status, reply: published, diagnostic, attempts, output }
+    }
     return {
       status: result.status,
       reply: await read('reply.json'),
@@ -92,6 +139,96 @@ async function invoke(events, { status = 0, stale = false, mode, rawStream } = {
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+const primaryAttempt = {
+  model: 'opencode/deepseek-v4.1-flash-free',
+  primaryKey: true,
+  cloudflareKey: false,
+  accountId: false,
+  geminiKey: false,
+}
+const backupAttempt = {
+  model: 'cloudflare-workers-ai/@cf/openai/gpt-oss-20b',
+  primaryKey: false,
+  cloudflareKey: true,
+  accountId: true,
+  geminiKey: false,
+}
+const providerError = (error) => ({
+  type: 'error',
+  error: { message: 'raw-model-output fake-private-key fake-backup-key', ...error },
+})
+
+test('review publishes a primary success with only the primary provider key', async () => {
+  const result = await invoke([submission(), stop], { mode: 'review', review: {} })
+  assert.equal(result.status, 0)
+  assert.deepEqual(result.reply, reply)
+  assert.deepEqual(result.attempts, [primaryAttempt])
+  assert.equal(result.output, '')
+})
+
+test('review retries recognized provider failures once with only Cloudflare credentials', async () => {
+  for (const error of [
+    { type: 'api', status: 429 },
+    { type: 'api', status: 408 },
+    { name: 'APIError', data: { statusCode: 503 } },
+    ...['no-route', 'free-limit', 'rate-limit', 'quota', 'internal', 'transport', 'timeout'].map(
+      (type) => ({ type: `provider.${type}` }),
+    ),
+  ]) {
+    const result = await invoke([providerError(error)], { status: 1, mode: 'review', review: {} })
+    assert.equal(result.status, 0)
+    assert.deepEqual(result.reply, reply)
+    assert.deepEqual(result.attempts, [primaryAttempt, backupAttempt])
+    assert.match(
+      result.output,
+      /^Independent review is retrying once with Cloudflare Workers AI\.\r?\n$/,
+    )
+  }
+  const limit = providerError({ type: 'api', status: 429 })
+  const failed = await invoke([limit], {
+    mode: 'review',
+    review: { backup: [limit] },
+  })
+  assert.equal(failed.status, 1)
+  assert.equal(failed.diagnostic.code, 'provider_error')
+  assert.deepEqual(failed.attempts, [primaryAttempt, backupAttempt])
+  assert.equal(failed.reply, null)
+})
+
+test('review preserves the primary error when either Cloudflare setting is missing', async () => {
+  for (const review of [{ key: '' }, { account: '' }]) {
+    const result = await invoke([providerError({ type: 'api', status: 429 })], {
+      status: 1,
+      mode: 'review',
+      review,
+    })
+    assert.equal(result.status, 1)
+    assert.deepEqual(result.diagnostic, { version: 5, code: 'cli_exit', stage: 'cli', exitCode: 1 })
+    assert.deepEqual(result.attempts, [primaryAttempt])
+    assert.equal(result.reply, null)
+  }
+})
+
+test('review rejects invalid and sensitive replies and terminal failures without fallback', async () => {
+  const rate = providerError({ type: 'api', status: 429 })
+  for (const [events, status, code] of [
+    [[submission({ ...reply, comment: '' }), rate], 1, 'reply_schema'],
+    [[submission({ ...reply, comment: 'fake-backup-key' }), rate], 1, 'reply_sensitive'],
+    [[submission({ ...reply, comment: 'fake-private-key' }), stop], 0, 'reply_sensitive'],
+    [[providerError({ type: 'provider.auth', status: 503 })], 1, 'cli_exit'],
+    [[providerError({ type: 'permission.rejected', status: 429 })], 1, 'cli_exit'],
+    [[providerError({ type: 'provider.invalid-request', status: 429 })], 1, 'cli_exit'],
+    [[providerError({ message: 'HTTP 429 raw-model-output' })], 1, 'cli_exit'],
+    [[], 1, 'cli_exit'],
+  ]) {
+    const result = await invoke(events, { status, mode: 'review', review: {} })
+    assert.equal(result.status, 1)
+    assert.equal(result.diagnostic.code, code)
+    assert.deepEqual(result.attempts, [primaryAttempt])
+    assert.equal(result.reply, null)
+  }
+})
 
 test('CLI preserves only the category and exit code when a model is unavailable', async () => {
   const event = {
