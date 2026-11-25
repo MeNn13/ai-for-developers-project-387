@@ -501,7 +501,7 @@ describe('booking page', () => {
     await user.click(screen.getByRole('button', { name: 'Продолжить' }))
     await screen.findByRole('heading', { name: 'Встреча забронирована' })
 
-    await user.click(screen.getByRole('button', { name: 'Записаться ещё' }))
+    await user.click(screen.getByRole('button', { name: 'Записаться на другую встречу' }))
 
     expect(await screen.findByRole('button', { name: /Знакомство/ })).toBeVisible()
     expect(screen.queryByText('Встреча забронирована')).not.toBeInTheDocument()

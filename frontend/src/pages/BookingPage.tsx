@@ -207,7 +207,7 @@ export function BookingPage() {
     setSlotRejection(null)
   }
 
-  // «Записаться ещё» возвращает экран в исходное состояние и перезапрашивает типы.
+  // «Записаться на другую встречу» возвращает экран в исходное состояние и перезапрашивает типы.
   function bookAgain() {
     setConfirmation(null)
     setSelectedType(null)
@@ -325,7 +325,7 @@ export function BookingPage() {
                 )}
               </Text>
               <Text className={classes.confirmationText}>{confirmation.guestName}</Text>
-              <Button onClick={bookAgain}>Записаться ещё</Button>
+              <Button onClick={bookAgain}>Записаться на другую встречу</Button>
             </Stack>
           </Paper>
         ) : (
