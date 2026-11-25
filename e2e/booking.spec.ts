@@ -85,7 +85,17 @@ test('mobile guest keeps selected time and booking controls in view', async ({ p
   await expect(page.getByText(/\(МСК\)$/)).toContainText(time)
   await expect(page.getByText(/\(МСК\)$/)).toContainText(day.replace(/\s+\d{4}$/, ''))
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await page.getByRole('button', { name: 'Записаться на другую встречу', exact: true }).click()
+  const bookAgain = page.getByRole('button', {
+    name: 'Записаться на другую встречу',
+    exact: true,
+  })
+  await expect(bookAgain).toBeVisible()
+  await expect(bookAgain).toHaveText('Записаться на другую встречу')
+  await bookAgain.scrollIntoViewIfNeeded()
+  await expect(bookAgain).toBeInViewport({ ratio: 1 })
+  expect(await bookAgain.evaluate((button) => button.scrollWidth <= button.clientWidth)).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await bookAgain.click()
   await page.getByRole('button', { name: /Mobile consultation/ }).click()
   await selectLastWorkingDay(page)
   const occupied = page.getByRole('button', { name: `${time} занято`, exact: true })
