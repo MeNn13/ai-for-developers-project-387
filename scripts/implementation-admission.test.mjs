@@ -1,8 +1,14 @@
-﻿import assert from 'node:assert/strict'
+import assert from 'node:assert/strict'
 import test from 'node:test'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { admit } from './implementation-admission.mjs'
 
 const repo = 'MeNn13/ai-for-developers-project-387'
+const repair = fileURLToPath(new URL('./implementation-repair.mjs', import.meta.url))
 function fixture(prior = [], surface = 'issue_comment') {
   const event = {
     action: 'created',
@@ -68,17 +74,76 @@ function fixture(prior = [], surface = 'issue_comment') {
   }
   return { api, event, calls, trust }
 }
-test('both comment surfaces share three admissions; the fourth never calls execution', async () => {
+
+test('gate reports safe pre-admission failures without emitting permission to run', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'repair-gate-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const eventPath = join(dir, 'event.json')
+  const output = join(dir, 'output')
+  const summary = join(dir, 'summary')
+  const preload = join(dir, 'fetch.mjs')
+  const f = fixture()
+  const current = await f.api('/actions/runs/100')
+  const payload = 'private comment and API details'
+  f.event.comment.body = `/oc fix 123 ${payload}`
+  writeFileSync(eventPath, JSON.stringify(f.event))
+
+  for (const [category, run, history] of [
+    ['untrusted_origin', { ...current, head_branch: payload }, null],
+    ['invalid_history', current, { total_count: 2, workflow_runs: [] }],
+  ]) {
+    const responses = {
+      '/pulls/50': await f.api('/pulls/50'),
+      '/actions/runs/100': run,
+      '/actions/runs?per_page=100&page=1': history,
+    }
+    writeFileSync(
+      preload,
+      `globalThis.fetch = async (url) => {
+        const path = url.split(${JSON.stringify(repo)})[1]
+        return Response.json(${JSON.stringify(responses)}[path])
+      }`,
+    )
+    writeFileSync(output, '')
+    writeFileSync(summary, '')
+    const result = spawnSync(
+      process.execPath,
+      ['--import', pathToFileURL(preload).href, repair, 'gate'],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          REPAIR_IO: dir,
+          GITHUB_ACTIONS: 'true',
+          GITHUB_EVENT_NAME: 'issue_comment',
+          GITHUB_EVENT_PATH: eventPath,
+          GITHUB_OUTPUT: output,
+          GITHUB_STEP_SUMMARY: summary,
+          GITHUB_RUN_ID: '100',
+          GITHUB_RUN_ATTEMPT: '1',
+          GITHUB_SHA: current.head_sha,
+          TRUSTED_SHA: f.trust.trustedSha,
+          PUBLISH_APP_BOT_ID: '123',
+        },
+      },
+    )
+    const diagnostic = `repair_failed phase=gate operation=admit category=${category} attempt=1 sha=${current.head_sha}`
+    assert.equal(result.status, 1, result.error?.message ?? result.stderr)
+    assert.equal(result.stderr, `::error::${diagnostic}\n`)
+    assert.equal(result.stdout, '')
+    assert.equal(readFileSync(summary, 'utf8'), `${diagnostic}\n`)
+    assert.equal(readFileSync(output, 'utf8'), '')
+  }
+})
+test('each comment surface admits the first three attempts and denies the fourth', async () => {
   for (const surface of ['issue_comment', 'pull_request_review_comment']) {
     for (let count = 0; count <= 3; count++) {
       const f = fixture(
         Array.from({ length: count }, (_, i) => ({ id: i + 1 })),
         surface,
       )
-      let executions = 0
       const result = await admit(surface, f.event, f.api, f.trust)
-      if (result.allowed) executions++
-      assert.equal(executions, count < 3 ? 1 : 0)
+      assert.equal(result.allowed, count < 3)
       assert.equal(result.reason, count < 3 ? 'admitted' : 'limit_exhausted')
     }
   }
@@ -91,7 +156,8 @@ test('inline merge-ref runs are trusted by workflow identity, including shared h
     head_branch: 'spec/38',
     head_sha: 'b'.repeat(40),
   }
-  const f = fixture([inline, { ...inline, id: 2 }, { id: 3 }], 'pull_request_review_comment')
+  const ordinary = { id: 3, event: 'issue_comment', head_branch: 'main', head_sha: 'a'.repeat(40) }
+  const f = fixture([inline, { ...inline, id: 2 }, ordinary], 'pull_request_review_comment')
   const original = f.api
   const api = async (path) =>
     path === '/actions/runs/100'
@@ -105,7 +171,70 @@ test('inline merge-ref runs are trusted by workflow identity, including shared h
     path.startsWith('/contents/') && path.endsWith('b'.repeat(40))
       ? { sha: 'd'.repeat(40) }
       : api(path)
-  await assert.rejects(admit('pull_request_review_comment', f.event, forged, f.trust), /history/)
+  await assert.rejects(
+    admit('pull_request_review_comment', f.event, forged, f.trust),
+    /untrusted_origin/,
+  )
+})
+
+test('inline PR head runs share the budget only with a trusted workflow and PR association', async () => {
+  const surface = 'pull_request_review_comment'
+  const head = 'b'.repeat(40)
+  const base = 'e'.repeat(40)
+  const repoUrl = `https://api.github.com/repos/${repo}`
+  const association = {
+    number: 50,
+    head: { sha: head, ref: 'spec/38', repo: { url: repoUrl } },
+    base: { sha: base, ref: 'main', repo: { url: repoUrl } },
+  }
+  const prior = { id: 1, event: 'issue_comment', head_branch: 'main', head_sha: base }
+  const failed = { id: 4, pull_requests: [association], conclusion: 'failure' }
+  const f = fixture([prior, { ...prior, id: 2 }, failed], surface)
+  const api = async (path) => {
+    if (path === `/git/commits/${head}`) return { parents: [{ sha: 'd'.repeat(40) }] }
+    if (path === '/actions/runs/100')
+      return { ...(await f.api(path)), pull_requests: [association] }
+    if (path.includes('/runs/4/attempts/'))
+      return {
+        total_count: 1,
+        jobs: [
+          {
+            name: 'implementation-context-pr-50',
+            status: 'completed',
+            steps: [
+              {
+                name: 'Fresh admission for this job and run attempt',
+                conclusion: 'failure',
+                number: 3,
+              },
+              { name: 'implementation-admitted', conclusion: 'skipped', number: 6 },
+            ],
+          },
+        ],
+      }
+    return f.api(path)
+  }
+  assert.equal((await admit(surface, f.event, api, f.trust)).reason, 'admitted')
+
+  const afterThird = async (path) => {
+    if (!path.startsWith('/actions/runs?')) return api(path)
+    const history = await f.api(path)
+    const third = { ...(await api('/actions/runs/100')), id: 3 }
+    return { total_count: 4, workflow_runs: [...history.workflow_runs, third] }
+  }
+  const fourth = await admit(surface, f.event, afterThird, f.trust)
+  assert.equal(fourth.reason, 'limit_exhausted')
+  assert.equal(fourth.allowed, false)
+
+  for (const [path, response] of [
+    ['/actions/runs/100', { ...(await api('/actions/runs/100')), pull_requests: [] }],
+    [`/compare/${base}...${head}`, { status: 'diverged' }],
+    [`/compare/${base}...${f.trust.trustedSha}`, { status: 'behind' }],
+    [`/contents/.github/workflows/opencode.yml?ref=${head}`, { sha: 'f'.repeat(40) }],
+  ]) {
+    const invalid = (request) => (request === path ? response : api(request))
+    await assert.rejects(admit(surface, f.event, invalid, f.trust), /untrusted_origin/)
+  }
 })
 test('partial rerun counts old attempts, while multiple stages of current attempt cost once', async () => {
   const f = fixture([{ id: 100, run_attempt: 3 }])
@@ -152,6 +281,20 @@ test('missing history and forged workflow metadata fail closed', async () => {
   }
 })
 
+test('a completed repair job with incomplete step history cannot free an admission', async () => {
+  const f = fixture([{ id: 1 }, { id: 2 }, { id: 3 }])
+  for (const steps of [undefined, [{ name: 'implementation-admitted' }]]) {
+    const api = (path) =>
+      path.includes('/runs/3/attempts/')
+        ? {
+            total_count: 1,
+            jobs: [{ name: 'implementation-context-pr-50', status: 'completed', steps }],
+          }
+        : f.api(path)
+    await assert.rejects(admit('issue_comment', f.event, api, f.trust), /invalid_history/)
+  }
+})
+
 test('ordinary inline discussion and other PR admissions cannot poison repair history', async () => {
   const f = fixture([{ id: 1, event: 'pull_request_review_comment', head_branch: 'feat/human' }])
   const original = f.api
@@ -169,5 +312,5 @@ test('ordinary inline discussion and other PR admissions cannot poison repair hi
     assert.equal((await admit('issue_comment', f.event, api, f.trust)).reason, 'admitted')
   }
   // A relevant forged marker must still be rejected after filtering unrelated jobs.
-  await assert.rejects(admit('issue_comment', f.event, f.api, f.trust), /history/)
+  await assert.rejects(admit('issue_comment', f.event, f.api, f.trust), /untrusted_origin/)
 })

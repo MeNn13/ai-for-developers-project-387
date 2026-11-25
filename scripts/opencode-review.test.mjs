@@ -212,6 +212,7 @@ test('review context includes linked grounds, review discussions, CI and calenda
   const context = await prepareReview(pr, 'o/r', api)
   assert.equal(context.related[0].body, 'Approved scope')
   assert.equal(context.diff, 'diff')
+  assert.equal(context.criteria, await readFile(new URL('../REVIEW.md', import.meta.url), 'utf8'))
   assert.match(context.criteria, /Europe\/Moscow/)
   assert.match(context.criteria, /атомар/)
   assert.equal(context.checks.check_runs[0].status, 'in_progress')

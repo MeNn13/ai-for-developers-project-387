@@ -430,6 +430,8 @@ jobs:
       actions: read
       issues: read
       pull-requests: read
+    outputs:
+      verified: ${{ steps.verify.outcome }}
     env:
       TRUSTED_SHA: ${{ needs.context.outputs.commit }}
       PUBLISH_APP_BOT_ID: ${{ vars.PUBLISH_APP_BOT_ID }}
@@ -463,12 +465,25 @@ jobs:
         with:
           name: implementation-reply
           path: ${{ runner.temp }}/repair/
-      - name: Fetch exact App branch head without credentials
+      - name: Fetch exact App branch head when missing
+        if: steps.gate.outputs.allowed == 'true'
+        env:
+          EXPECTED_HEAD: ${{ needs.implementation-context.outputs.head }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! git cat-file -e "$EXPECTED_HEAD^{commit}"; then
+            auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+            echo "::add-mask::$auth"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+              git fetch origin "$EXPECTED_HEAD"
+          fi
+      - name: Prepare exact App branch worktree
         if: steps.gate.outputs.allowed == 'true'
         env:
           EXPECTED_HEAD: ${{ needs.implementation-context.outputs.head }}
         run: |
-          git fetch origin "$EXPECTED_HEAD"
           echo "REPAIR_CANDIDATE_ROOT=$RUNNER_TEMP/repair-candidate" >> "$GITHUB_ENV"
           git worktree add --detach "$RUNNER_TEMP/repair-candidate" "$EXPECTED_HEAD"
       - name: Validate protected baseline before candidate execution
@@ -494,6 +509,7 @@ jobs:
         run: node scripts/implementation-sandbox.mjs
       - name: Record successful exact SHA verification
         if: steps.gate.outputs.allowed == 'true'
+        id: verify
         run: node scripts/implementation-repair.mjs verify
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: steps.gate.outputs.allowed == 'true'
@@ -513,7 +529,7 @@ jobs:
   implementation-publish:
     name: implementation-publish-pr-${{ github.event.issue.number || github.event.pull_request.number }}
     needs: [context, implementation-context, implementation-check]
-    if: needs.implementation-check.result == 'success'
+    if: needs.implementation-check.outputs.verified == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     concurrency:

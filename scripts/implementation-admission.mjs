@@ -1,10 +1,17 @@
-﻿import { trustedHuman } from './opencode-publish.mjs'
+import { trustedHuman } from './opencode-publish.mjs'
 
 import { trustedOrigin } from './implementation-origin.mjs'
 
 const repository = 'MeNn13/ai-for-developers-project-387'
 const workflows = ['.github/workflows/opencode.yml', '.github/workflows/implementation-publish.yml']
 const sha = /^[a-f0-9]{40}$/
+
+export class AdmissionFailure extends Error {
+  constructor(reason) {
+    super(reason === 'untrusted_origin' ? 'untrusted_origin' : 'invalid_history')
+  }
+}
+
 export async function admit(surface, event, api, trust) {
   const denied = (reason) => ({ allowed: false, reason })
   if (
@@ -26,33 +33,43 @@ export async function admit(surface, event, api, trust) {
     !sha.test(pr.head.sha)
   )
     return denied('ownership')
-  const current = await api(`/actions/runs/${trust.runId}`)
+  const historyApi = async (path) => {
+    try {
+      const response = await api(path)
+      if (response && typeof response === 'object' && !Array.isArray(response)) return response
+    } catch {
+      // A failed request and an unreadable response both leave the history incomplete.
+    }
+    throw new AdmissionFailure('invalid_history')
+  }
+  const current = await historyApi(`/actions/runs/${trust.runId}`)
+  if (current?.run_attempt !== trust.attempt) throw new AdmissionFailure('invalid_history')
   if (
     !workflows.includes(current.path) ||
     current.event !== surface ||
-    !(await trustedOrigin(current, api, trust.trustedSha)) ||
+    !(await trustedOrigin(current, historyApi, trust.trustedSha)) ||
     (surface !== 'pull_request_review_comment' && current.head_sha !== trust.trustedSha) ||
-    current.repository?.full_name !== repository ||
-    current.run_attempt !== trust.attempt
+    current.repository?.full_name !== repository
   )
-    throw new Error('history')
+    throw new AdmissionFailure('untrusted_origin')
   const runs = []
   let complete = false
   for (let page = 1; page <= 100; page++) {
-    const batch = await api(`/actions/runs?per_page=100&page=${page}`)
-    if (!Array.isArray(batch.workflow_runs) || !Number.isSafeInteger(batch.total_count))
-      throw new Error('history')
+    const batch = await historyApi(`/actions/runs?per_page=100&page=${page}`)
+    if (!Array.isArray(batch?.workflow_runs) || !Number.isSafeInteger(batch.total_count))
+      throw new AdmissionFailure('invalid_history')
     runs.push(...batch.workflow_runs)
     if (runs.length === batch.total_count) {
       complete = true
       break
     }
-    if (batch.workflow_runs.length < 100) throw new Error('history')
+    if (batch.workflow_runs.length < 100) throw new AdmissionFailure('invalid_history')
   }
-  if (!complete) throw new Error('history')
+  if (!complete) throw new AdmissionFailure('invalid_history')
   let count = 0
   let already = false
   for (const run of runs) {
+    if (typeof run?.path !== 'string') throw new AdmissionFailure('invalid_history')
     if (!workflows.includes(run.path)) continue
     if (
       run.repository?.full_name !== repository ||
@@ -60,25 +77,44 @@ export async function admit(surface, event, api, trust) {
       !Number.isSafeInteger(run.run_attempt) ||
       run.run_attempt < 1
     )
-      throw new Error('history')
+      throw new AdmissionFailure('invalid_history')
     for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
-      const jobs = await api(`/actions/runs/${run.id}/attempts/${attempt}/jobs?per_page=100`)
-      if (!Array.isArray(jobs.jobs) || jobs.total_count !== jobs.jobs.length)
-        throw new Error('history')
-      const admitted = jobs.jobs.some(
-        (j) =>
-          /^implementation-/.test(j.name) &&
-          j.name.endsWith(`-pr-${number}`) &&
-          j.steps?.some((s) => s.name === 'implementation-admitted' && s.conclusion === 'success'),
+      const jobs = await historyApi(`/actions/runs/${run.id}/attempts/${attempt}/jobs?per_page=100`)
+      if (!Array.isArray(jobs?.jobs) || jobs.total_count !== jobs.jobs.length)
+        throw new AdmissionFailure('invalid_history')
+      if (jobs.jobs.some((job) => typeof job?.name !== 'string'))
+        throw new AdmissionFailure('invalid_history')
+      const repairJobs = jobs.jobs.filter(
+        ({ name }) => name.startsWith('implementation-') && name.endsWith(`-pr-${number}`),
+      )
+      for (const job of repairJobs) {
+        const completed = run.status === 'completed' || job.status === 'completed'
+        if (job.steps == null && !completed) continue
+        if (!Array.isArray(job.steps) || job.steps.some((step) => typeof step?.name !== 'string'))
+          throw new AdmissionFailure('invalid_history')
+        if (
+          completed &&
+          job.steps.some(
+            (step) =>
+              step.name === 'implementation-admitted' && typeof step.conclusion !== 'string',
+          )
+        )
+          throw new AdmissionFailure('invalid_history')
+      }
+      const admitted = repairJobs.some(({ steps }) =>
+        steps?.some(
+          (step) => step.name === 'implementation-admitted' && step.conclusion === 'success',
+        ),
       )
       if (!admitted) continue
-      if (!(await trustedOrigin(run, api, trust.trustedSha))) throw new Error('history')
+      if (!(await trustedOrigin(run, historyApi, trust.trustedSha)))
+        throw new AdmissionFailure('untrusted_origin')
       if (
         ![run.created_at, run.updated_at, event.comment.created_at].every((s) =>
           Number.isFinite(Date.parse(s)),
         )
       )
-        throw new Error('history')
+        throw new AdmissionFailure('invalid_history')
       const same = run.id === trust.runId && attempt === trust.attempt
       if (same) {
         already = true

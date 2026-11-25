@@ -1,333 +1,399 @@
-import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises'
-import { spawnSync } from 'node:child_process'
-import config from '../.github/opencode/opencode.json' with { type: 'json' }
-import { resolve } from 'node:path'
-import { createHash } from 'node:crypto'
-import { pathToFileURL } from 'node:url'
-import { decodeModel, ImplementationFailure } from './implementation-model-output.mjs'
 import {
-  InvalidResult,
-  resultInstructions,
-  validateChanges,
-  validateExistingDocuments,
-  validateReview,
-} from './implementation-result.mjs'
+  appendFileSync,
+  copyFileSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { dirname, resolve } from 'node:path'
+import config from '../.github/opencode/opencode.json' with { type: 'json' }
+import { decodeModel, ImplementationFailure } from './implementation-model-output.mjs'
+import { allowedFile } from './implementation-publish.mjs'
+import { validateChanges, validateExistingDocuments } from './implementation-result.mjs'
 
-const phase = ['first', 'final'].includes(process.argv[2]) ? process.argv[2] : 'unknown'
-let activeTicket = 'none'
-let reviewAxis
-let operation = 'preflight'
-let checkedSha
-const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex')
-const requireValue = (ok) => {
-  if (!ok) throw new Error('initial_graph_failed')
-}
-const trustedRoot = resolve(import.meta.dirname, '..')
 const root = process.env.INITIAL_CANDIDATE_ROOT
-const directory = process.env.INITIAL_IO
-const read = async (name) => JSON.parse(await readFile(`${directory}/${name}.json`, 'utf8'))
-const write = (name, value) => writeFile(`${directory}/${name}.json`, JSON.stringify(value))
-function command(bin, args, options = {}, modelCall = false, onFailure) {
-  const timeout = options.timeout
-  // GNU timeout controls the process group, including model/check descendants.
-  const bounded = process.platform === 'linux' && Number.isFinite(timeout)
+const io = process.env.INITIAL_IO
+const read = (directory, name) =>
+  JSON.parse(readFileSync(resolve(directory, name + '.json'), 'utf8'))
+const write = (directory, name, value) =>
+  writeFileSync(resolve(directory, name + '.json'), JSON.stringify(value))
+const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const shaPattern = /^[a-f0-9]{40}$/
+const fail = (category) => {
+  throw new ImplementationFailure(category)
+}
+let stage = 'preflight'
+let base
+let sha
+let checkDetail
+
+function run(bin, args, options = {}, timeout) {
+  if (timeout !== undefined && timeout <= 0) fail('timeout')
+  const bounded = process.platform === 'linux' && timeout !== undefined
   const child = spawnSync(
-    bounded ? 'timeout' : bin,
-    bounded
-      ? [
-          '--signal=TERM',
-          '--kill-after=10s',
-          `${Math.max(1, Math.floor(timeout / 1000))}s`,
-          bin,
-          ...args,
-        ]
-      : args,
+    bounded ? '/usr/bin/timeout' : bin,
+    bounded ? ['--kill-after=5s', `${Math.ceil(timeout / 1000)}s`, bin, ...args] : args,
     {
       cwd: root,
       encoding: 'utf8',
-      maxBuffer: 2_000_000,
+      maxBuffer: 12_000_000,
+      timeout: bounded ? timeout + 10000 : timeout,
       ...options,
-      ...(bounded ? { timeout: timeout + 15000 } : {}),
     },
   )
   if ((bounded && [124, 137].includes(child.status)) || child.error?.code === 'ETIMEDOUT')
-    throw new ImplementationFailure('timeout')
-  if (modelCall) return decodeModel(child, bounded)
-  if (child.status !== 0 && onFailure) throw onFailure(child)
-  requireValue(child.status === 0)
-  return child.stdout?.trim()
+    fail('timeout')
+  return child
 }
-const git = (args, options) => command('git', args, options)
-function remaining(context) {
-  const ms = context.deadline - Date.now()
-  if (ms <= 0) throw new ImplementationFailure('timeout')
-  return ms
+
+function git(args) {
+  const child = run('git', args)
+  if (child.status !== 0) fail('candidate_git')
+  return child.stdout.trim()
 }
-function clean() {
-  requireValue(git(['status', '--porcelain', '--untracked-files=no']) === '')
+
+function scan(directory, baseline) {
+  const entries = new Map()
+  const seen = new Set()
+  let bytes = 0
+  function walk(parent) {
+    for (const name of readdirSync(resolve(directory, parent))) {
+      const path = parent ? parent + '/' + name : name
+      const key = path.toLowerCase()
+      if (seen.size >= 10000 || seen.has(key) || name.toLowerCase() === '.git') fail('file_rules')
+      seen.add(key)
+      const absolute = resolve(directory, path)
+      const info = lstatSync(absolute)
+      const mode = info.mode & 0o7777
+      const old = baseline?.get(path)
+      if (old && (old.mode !== mode || old.directory !== info.isDirectory())) fail('file_rules')
+      if (info.isDirectory()) {
+        if (!old && process.platform === 'linux' && mode !== 0o755) fail('file_rules')
+        entries.set(path, { directory: true, mode })
+        walk(path)
+      } else {
+        if (
+          !info.isFile() ||
+          info.nlink !== 1 ||
+          (!old && process.platform === 'linux' && mode !== 0o644)
+        )
+          fail('file_rules')
+        bytes += info.size
+        if (bytes > 30_000_000) fail('file_rules')
+        entries.set(path, { directory: false, mode, bytes: readFileSync(absolute) })
+      }
+    }
+  }
+  walk('')
+  return entries
 }
-function checked(context) {
-  operation = 'check'
-  checkedSha = git(['rev-parse', 'HEAD'])
-  requireValue(/^[a-f0-9]{40}$/.test(checkedSha))
-  command(
-    process.execPath,
-    [resolve(trustedRoot, 'scripts/implementation-sandbox.mjs')],
-    {
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: remaining(context),
-      env: { ...process.env, REPAIR_CANDIDATE_ROOT: root, OPENCODE_API_KEY: '', GH_TOKEN: '' },
-    },
-    false,
-    (child) => {
-      if (child.status === 124) return new ImplementationFailure('timeout')
-      const detail = child.stdout?.trim()
-      return new ImplementationFailure(
-        detail === 'check_definition' || /^task_failed task=[a-z][a-z0-9:-]*$/.test(detail)
-          ? detail
-          : 'sandbox_launch',
+
+function changes(before, after, key) {
+  const files = []
+  const parents = new Set()
+  for (const path of [...new Set([...before.keys(), ...after.keys()])].sort()) {
+    const old = before.get(path)
+    const next = after.get(path)
+    if (old?.directory || next?.directory || (old && next && old.bytes.equals(next.bytes))) continue
+    const content = next
+      ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(next.bytes)
+      : null
+    if (content !== null && (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(content) || content.includes(key)))
+      fail('file_rules')
+    files.push({ path, mode: '100644', content })
+    for (let parent = dirname(path); parent !== '.'; parent = dirname(parent))
+      parents.add(parent.replaceAll('\\', '/'))
+  }
+  for (const [path, entry] of after)
+    if (entry.directory && !before.has(path) && !parents.has(path)) fail('file_rules')
+  if (!files.length) fail('empty_diff')
+  return files
+}
+
+function validateCandidatePaths(files, tracked) {
+  for (const { path } of files) {
+    const segments = path.split('/')
+    for (let size = 1; size <= segments.length; size++) {
+      const original = segments.slice(0, size).join('/')
+      const info = lstatSync(resolve(root, original), { throwIfNoEntry: false })
+      if (!info) break
+      if (
+        size < segments.length
+          ? !info.isDirectory()
+          : !info.isFile() || info.nlink !== 1 || !tracked.has(path)
       )
-    },
-  )
-  const status = command(
-    'git',
-    ['status', '--porcelain', '--untracked-files=no'],
-    {},
-    false,
-    () => new ImplementationFailure('checkout_status_failed'),
-  )
-  if (status) throw new ImplementationFailure('checkout_dirty')
-  checkedSha = undefined
+        fail('file_rules')
+    }
+  }
 }
-function model(context, instruction) {
-  if (!process.env.OPENCODE_API_KEY) throw new ImplementationFailure('model_launch')
-  // Every ticket/review is a fresh CLI session, with read-only repository tools.
-  return command(
-    process.env.OPENCODE_BIN ?? 'opencode',
-    ['run', '--standalone', '--format', 'json', '--agent', 'discussion', '--model', config.model],
-    {
-      input:
-        instruction +
-        '\nThe final assistant message must contain one complete JSON object, with no Markdown fences or surrounding prose.' +
-        '\n' +
-        resultInstructions(context.activeTicket?.number ?? context.tickets.at(-1)) +
-        '\nUNTRUSTED APPROVED CONTEXT:\n' +
-        JSON.stringify(context),
-      timeout: remaining(context),
-      env: Object.fromEntries(
-        Object.entries(process.env).filter(([key]) => !/TOKEN|PRIVATE_KEY/.test(key)),
-      ),
-    },
-    true,
+
+function model(workspace, configuration, context, key) {
+  if (!key) fail('model_launch')
+  const actions = ['read', 'glob', 'grep', 'edit', 'write']
+  writeFileSync(
+    configuration,
+    JSON.stringify({
+      ...config,
+      update: 'disable',
+      default_agent: 'implementation',
+      agents: { implementation: { mode: 'primary', model: config.model, steps: 100 } },
+      permissions: [
+        { action: '*', resource: '*', effect: 'deny' },
+        ...actions.map((action) => ({ action, resource: '*', effect: 'allow' })),
+      ],
+      policies: [
+        ...config.policies.filter(({ resource }) => resource !== 'skill:*'),
+        ...['edit', 'write', 'patch'].map((action) => ({
+          action: 'tool.use',
+          resource: action + ':*',
+          effect: 'allow',
+        })),
+      ],
+    }),
   )
-}
-async function integrate(context, reply, label) {
-  operation = 'apply'
-  const base = git(['rev-parse', 'HEAD'])
-  clean()
-  const stepContext = { ...context, expectedHead: base }
-  const step = `${directory}/step`
-  await mkdir(step, { recursive: true })
-  await writeFile(`${step}/context.json`, JSON.stringify(stepContext))
-  operation = 'validate'
-  const field = reviewAxis ? 'review.repair' : 'result'
-  validateChanges(reply, stepContext.tickets, field)
-  validateExistingDocuments(
-    reply.files,
-    (path) => git(['ls-tree', base, '--', path]).startsWith('100644 blob '),
-    field,
-  )
-  operation = 'apply'
-  await writeFile(`${step}/reply.json`, JSON.stringify(reply))
-  command(
-    process.execPath,
-    [resolve(trustedRoot, 'scripts/implementation-repair.mjs'), 'candidate'],
+  const bin = process.env.OPENCODE_BIN
+  if (!bin) fail('model_launch')
+  const child = run(
+    '/usr/bin/bwrap',
+    [
+      '--unshare-pid',
+      '--unshare-user',
+      '--unshare-ipc',
+      '--unshare-uts',
+      '--cap-drop',
+      'ALL',
+      '--die-with-parent',
+      '--new-session',
+      '--dev',
+      '/dev',
+      '--proc',
+      '/proc',
+      '--tmpfs',
+      '/tmp',
+      '--dir',
+      '/tmp/home',
+      '--ro-bind',
+      '/usr/lib',
+      '/usr/lib',
+      '--symlink',
+      'usr/lib',
+      '/lib',
+      '--symlink',
+      'usr/lib64',
+      '/lib64',
+      '--ro-bind-try',
+      '/usr/lib64',
+      '/usr/lib64',
+      '--ro-bind',
+      '/etc/resolv.conf',
+      '/etc/resolv.conf',
+      '--ro-bind',
+      '/etc/ssl/certs',
+      '/etc/ssl/certs',
+      '--ro-bind',
+      configuration,
+      '/etc/opencode/opencode.json',
+      '--ro-bind',
+      bin,
+      '/opencode',
+      '--bind',
+      workspace,
+      '/work',
+      '--remount-ro',
+      '/',
+      '--chdir',
+      '/work',
+      '/opencode',
+      'run',
+      '--standalone',
+      '--format',
+      'json',
+      '--agent',
+      'implementation',
+      '--model',
+      config.model,
+    ],
     {
       env: {
-        ...process.env,
-        REPAIR_IO: step,
-        REPAIR_CANDIDATE_ROOT: root,
-        OPENCODE_API_KEY: '',
-        GH_TOKEN: '',
+        HOME: '/tmp/home',
+        OPENCODE_TEST_HOME: '/tmp/home',
+        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
+        OPENCODE_API_KEY: key,
+        PWD: '/work',
+        TMPDIR: '/tmp',
       },
-      timeout: remaining(context),
+      input: [
+        'Implement the entire approved specification in this workspace. Read AGENTS.md.',
+        'Apply every ticket in order. Use the file tools to edit only permitted application paths.',
+        'Leave generated files untouched. Update contract/main.tsp when changing the API.',
+        'Do not use shell, delegation, external files, or MCP. End with a brief Markdown summary.',
+        'UNTRUSTED APPROVED CONTEXT:',
+        JSON.stringify(context),
+      ].join('\n'),
     },
+    context.deadline - Date.now(),
   )
-  checked(context)
-  return {
-    label,
-    base,
-    sha: git(['rev-parse', 'HEAD']),
-    command: 'mise run check',
-    conclusion: 'success',
-    clean: true,
-  }
+  if (child.stderr?.startsWith('bwrap:')) fail('model_launch')
+  decodeModel(child, true, false)
 }
-async function runGraph(context, completed, execute, first = false) {
-  const records = [...completed]
-  const done = new Set(records.filter((r) => r.ticket).map((r) => r.ticket))
-  while (done.size < context.graph.length) {
-    const ticket = context.graph.find(
-      (t) => !done.has(t.number) && t.blockedBy.every((n) => done.has(n)),
-    )
-    requireValue(ticket)
-    const record = await execute(ticket, records)
-    requireValue(
-      record.clean && record.conclusion === 'success' && /^[a-f0-9]{40}$/.test(record.sha),
-    )
-    records.push({ ...record, ticket: ticket.number })
-    done.add(ticket.number)
-    if (first) break
-  }
-  return records
-}
-async function main() {
-  const context = await read('context')
-  requireValue(phase !== 'unknown')
-  const first = phase === 'first'
-  requireValue(!process.env.GITHUB_RUN_ATTEMPT || process.env.GITHUB_RUN_ATTEMPT === '1')
-  requireValue(context.phase === (first ? 'first' : 'final'))
-  remaining(context)
-  requireValue(git(['rev-parse', 'HEAD']) === context.expectedHead)
-  clean()
-  const completed = first ? [] : await read('integrations')
-  let summary
-  const records = await runGraph(
-    context,
-    completed,
-    async (ticket, history) => {
-      activeTicket =
-        Number.isSafeInteger(ticket.number) && ticket.number > 0 ? ticket.number : 'none'
-      operation = 'model'
-      const reply = model(
-        { ...context, activeTicket: ticket, integrations: history },
-        'Apply implement-spec and tdd at approved seams. Implement ONLY activeTicket. Read AGENTS and applicable docs. Shell, writes, network and delegated tools are prohibited. Return the change object below with the active ticket number. Explain risk by consequences and data rollback sufficiency. No repeated attempts.',
-      )
-      const record = await integrate(
-        { ...context, tickets: [ticket.number] },
-        reply,
-        `ticket-${ticket.number}`,
-      )
-      activeTicket = 'none'
-      operation = 'graph'
-      return record
-    },
-    first,
+
+function main() {
+  const context = read(io, 'context')
+  if (shaPattern.test(context.base)) base = context.base
+  if (context.deadline <= Date.now()) fail('timeout')
+  if (
+    (process.env.GITHUB_RUN_ATTEMPT ?? '1') !== '1' ||
+    context.phase !== 'single' ||
+    !shaPattern.test(context.base) ||
+    context.base !== context.expectedHead ||
+    context.base !== context.trustedSha ||
+    git(['rev-parse', 'HEAD']) !== context.base ||
+    git(['status', '--porcelain', '--untracked-files=no'])
   )
-  await write('integrations', records)
-  if (!first) {
-    for (const axis of ['Standards', 'Spec']) {
-      reviewAxis = axis
-      // The read-only CLI cannot run Git. Supply the actual base-to-head change
-      // as data, refreshing it after any repair by the preceding review session.
-      operation = axis === 'Standards' ? 'review_standards' : 'review_spec'
-      const reviewContext = {
-        base: context.base,
-        head: git(['rev-parse', 'HEAD']),
-        diff: git([
-          'diff',
-          '--no-ext-diff',
-          '--no-textconv',
-          '--no-renames',
-          '--unified=80',
-          context.base,
-          'HEAD',
-        ]),
-      }
-      const review = model(
-        { ...context, integrations: records, review: reviewContext },
-        `Perform independent ${axis} review of entire integrated graph against base ${context.base}. Read changes and approved context. Return exactly {findings:[{path,line,conditions,consequences}],risk,rollback,repair}. Use those exact finding keys, a positive integer line, and nonblank strings. If findings is nonempty, repair must be a change object as described below for a ticket in scope. Otherwise use repair:null. Summarize consequences and risk of ENTIRE change; explain whether reverting code suffices for data. Provide only confirmed defects. No writes or shell. Review is separate from external GitHub author review.`,
-      )
-      operation = 'validate'
-      validateReview(review)
-      summary = review
-      if (review.findings.length) {
-        records.push(await integrate(context, review.repair, `review-${axis}`))
-      }
-      operation = 'record'
-      await write(`review-${axis}`, review)
+    fail('candidate_base')
+  const scratch = mkdtempSync(resolve(io, 'scratch-'))
+  try {
+    const workspace = resolve(scratch, 'work')
+    mkdirSync(workspace)
+    const tracked = git(['ls-files', '--stage', '-z']).split('\0').filter(Boolean)
+    const paths = new Set()
+    for (const entry of tracked) {
+      const [, path] = entry.match(/^100644 [a-f0-9]{40} 0\t(.+)$/) ?? []
+      if (!path || lstatSync(resolve(root, path)).isSymbolicLink()) fail('candidate_base')
+      const target = resolve(workspace, path)
+      mkdirSync(dirname(target), { recursive: true })
+      copyFileSync(resolve(root, path), target)
+      paths.add(path)
     }
-    reviewAxis = undefined
-  }
-  // Preserve the per-ticket commits locally; publish one deterministic phase commit.
-  operation = 'assemble'
-  const files = []
-  for (const path of git(['diff', '--no-renames', '--name-only', context.expectedHead, 'HEAD'])
-    .split('\n')
-    .filter(Boolean)) {
-    const entry = git(['ls-tree', 'HEAD', '--', path])
-    requireValue(entry === '' || entry.startsWith('100644 blob '))
-    files.push({
-      path,
-      mode: '100644',
-      content: entry ? await readFile(resolve(root, path), 'utf8') : null,
+    const before = scan(workspace)
+    stage = 'model'
+    const key = process.env.OPENCODE_API_KEY
+    model(workspace, resolve(scratch, 'opencode.json'), context, key)
+    stage = 'diff'
+    const files = changes(before, scan(workspace, before), key)
+    const reply = {
+      version: 1,
+      message: `feat: implement approved calendar changes (#${context.tickets.at(-1)})`,
+      files,
+      risk: 'The diff, generated artifacts and automated checks were verified. Review behavioral and deployment risks before merging.',
+      rollback:
+        'Revert the implementation commit to restore the previous code. Verify runtime and data impact before rollback.',
+    }
+    validateChanges(reply, context.tickets)
+    validateExistingDocuments(files, (path) => paths.has(path))
+    validateCandidatePaths(files, paths)
+    stage = 'candidate'
+    write(scratch, 'context', context)
+    write(scratch, 'reply', reply)
+    const {
+      OPENCODE_API_KEY: _key,
+      GH_TOKEN: _token,
+      PUBLISH_APP_PRIVATE_KEY: _appKey,
+      ...environment
+    } = process.env
+    const candidate = run(
+      process.execPath,
+      [resolve(import.meta.dirname, 'implementation-repair.mjs'), 'candidate'],
+      {
+        env: { ...environment, REPAIR_IO: scratch, REPAIR_CANDIDATE_ROOT: root },
+      },
+      context.deadline - Date.now(),
+    )
+    if (candidate.status !== 0)
+      fail(
+        candidate.stderr.trim() === 'generation_failed' ? 'generation_failed' : 'candidate_failed',
+      )
+    const result = { ...read(scratch, 'result'), ready: true }
+    if (
+      !result.files.every(allowedFile) ||
+      result.files.length > 200 ||
+      new Set(result.files.map(({ path }) => path.toLowerCase())).size !== result.files.length ||
+      Buffer.byteLength(JSON.stringify(result)) > 2_000_000
+    )
+      fail('file_rules')
+    sha = result.candidateSha
+    stage = 'check'
+    if (
+      !shaPattern.test(sha) ||
+      git(['rev-parse', 'HEAD']) !== sha ||
+      git(['rev-parse', 'HEAD^']) !== base
+    )
+      fail('candidate_sha')
+    const checked = run(
+      process.execPath,
+      [resolve(import.meta.dirname, 'implementation-sandbox.mjs')],
+      {
+        env: { ...environment, REPAIR_CANDIDATE_ROOT: root },
+      },
+      context.deadline - Date.now(),
+    )
+    if (checked.status === 124) fail('timeout')
+    if (checked.status !== 0) {
+      // Only the trusted sandbox wrapper writes stdout. Candidate output is discarded.
+      const marker = checked.stdout?.trim()
+      const task = /^task_failed task=([a-z][a-z0-9:-]{0,40})$/.exec(marker)?.[1]
+      if (task) checkDetail = { task }
+      else if (marker === 'sandbox_launch' || marker === 'check_definition')
+        checkDetail = { reason: marker }
+      fail('check_failed')
+    }
+    if (
+      git(['rev-parse', 'HEAD']) !== sha ||
+      git(['status', '--porcelain', '--untracked-files=no'])
+    ) {
+      checkDetail = { reason: 'checkout_changed' }
+      fail('check_failed')
+    }
+    stage = 'record'
+    write(io, 'verification', {
+      version: 1,
+      runId: context.runId,
+      resultDigest: digest(result),
+      sha,
+      command: 'mise run check',
+      conclusion: 'success',
+      ready: true,
     })
+    write(io, 'result', result)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
   }
-  const identity = {
-    ...process.env,
-    GIT_AUTHOR_NAME: 'Implementation Publisher',
-    GIT_AUTHOR_EMAIL: 'implementation-publisher@users.noreply.github.com',
-    GIT_AUTHOR_DATE: context.commitDate,
-    GIT_COMMITTER_NAME: 'Implementation Publisher',
-    GIT_COMMITTER_EMAIL: 'implementation-publisher@users.noreply.github.com',
-    GIT_COMMITTER_DATE: context.commitDate,
-  }
-  const last = context.tickets.at(-1)
-  const message = `feat: implement approved calendar changes (#${first ? records[0].ticket : last})`
-  const candidateSha = git(['commit-tree', git(['write-tree']), '-p', context.expectedHead], {
-    input: message + '\n',
-    env: identity,
-  })
-  git(['checkout', '--detach', candidateSha])
-  const lastReply =
-    summary ??
-    (records.length > completed.length
-      ? JSON.parse(await readFile(`${directory}/step/reply.json`, 'utf8'))
-      : await read('result'))
-  const result = {
-    version: 1,
-    contextDigest: digest(context),
-    candidateSha,
-    ready: !first,
-    message,
-    files,
-    risk: lastReply.risk,
-    rollback: lastReply.rollback,
-  }
-  await write('result', result)
-  checked(context)
-  operation = 'record'
-  await write('verification', {
-    version: 1,
-    runId: context.runId,
-    resultDigest: digest(result),
-    command: 'mise run check',
-    conclusion: 'success',
-    ready: !first,
-    sha: candidateSha,
-  })
-  await write('integrations', records)
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
-  main().catch(async (error) => {
-    const categories = { validate: 'invalid_result', apply: 'apply_failed', check: 'check_failed' }
-    const category =
-      error instanceof ImplementationFailure ? error.message : (categories[operation] ?? 'unknown')
-    const prefix = category === 'timeout' ? 'initial_timeout' : 'initial_graph_failed'
-    const status =
-      error instanceof ImplementationFailure && error.status !== undefined
-        ? ` status=${error.status}`
-        : ''
-    const target = reviewAxis ? `axis=${reviewAxis}` : `ticket=${activeTicket}`
-    const violation = error instanceof InvalidResult ? ` ${error.message}` : ''
-    const sha =
-      operation === 'check' && /^[a-f0-9]{40}$/.test(checkedSha) ? ` sha=${checkedSha}` : ''
-    const diagnostic = `${prefix} phase=${phase} ${target} operation=${operation} category=${category}${status}${violation}${sha}`
-    console.error(diagnostic)
-    if (process.env.GITHUB_OUTPUT)
-      await appendFile(
-        process.env.GITHUB_OUTPUT,
-        `reason=${category === 'timeout' ? 'timeout' : 'unknown'}\ndiagnostic=${diagnostic}\n`,
-      ).catch(() => console.error('graph_output_unavailable'))
-    process.exitCode = 1
-  })
+
+try {
+  main()
+} catch (error) {
+  const category =
+    error instanceof ImplementationFailure
+      ? error.message
+      : stage === 'diff'
+        ? 'file_rules'
+        : 'unexpected'
+  const diagnostic = {
+    stage,
+    category,
+    base: base ?? null,
+    sha: shaPattern.test(sha) ? sha : null,
+    ...checkDetail,
+    ...(Number.isInteger(error.status) ? { status: error.status } : {}),
+  }
+  write(io, 'diagnostic', diagnostic)
+  console.error(JSON.stringify(diagnostic))
+  if (process.env.GITHUB_STEP_SUMMARY)
+    appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `Initial implementation: ${JSON.stringify(diagnostic)}\n`,
+    )
+  if (process.env.GITHUB_OUTPUT)
+    appendFileSync(
+      process.env.GITHUB_OUTPUT,
+      `reason=${category === 'timeout' ? 'timeout' : 'failed'}\n`,
+    )
+  process.exitCode = 1
+}

@@ -115,27 +115,3 @@ export function validateExistingDocuments(files, exists, field = 'result') {
       requireResult(exists(path), `${field}.files.path`, 'existing_document', ` index=${index}`)
   }
 }
-
-export function validateReview(review) {
-  keys(review, ['findings', 'risk', 'rollback', 'repair'], 'review')
-  requireResult(Array.isArray(review.findings), 'review.findings', 'array')
-  for (const [index, finding] of review.findings.entries()) {
-    const details = ` index=${index}`
-    keys(finding, ['path', 'line', 'conditions', 'consequences'], 'review.findings', details)
-    requireResult(
-      Number.isSafeInteger(finding.line) && finding.line > 0,
-      'review.findings.line',
-      'positive_integer',
-      `${details} min=1`,
-    )
-    for (const key of ['path', 'conditions', 'consequences'])
-      requireResult(nonempty(finding[key]), `review.findings.${key}`, 'nonblank', details)
-  }
-  for (const key of ['risk', 'rollback'])
-    requireResult(nonempty(review[key]), `review.${key}`, 'nonblank')
-  requireResult(
-    review.findings.length ? review.repair !== null : review.repair === null,
-    'review.repair',
-    'matches_findings',
-  )
-}

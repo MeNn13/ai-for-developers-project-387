@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync, execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { validateRepair, recoveryArtifact } from './implementation-repair.mjs'
+import { validateRepair, recoveryArtifact, repairContext } from './implementation-repair.mjs'
 import { completion } from './implementation-completion.mjs'
 
 const reply = {
@@ -15,6 +15,101 @@ const reply = {
   risk: 'UI behavior',
   rollback: 'Revert commit',
 }
+
+test('repair context accepts both initial receipt generations and supplies a UTC timestamp', async () => {
+  const repository = 'MeNn13/ai-for-developers-project-387'
+  const trustedSha = 'a'.repeat(40)
+  const head = { sha: 'b'.repeat(40), repo: { full_name: repository } }
+  const human = { login: 'MeNn13', type: 'User' }
+  const original = {
+    source: 1,
+    spec: 2,
+    tickets: [3],
+    snapshots: [{ number: 3, body: 'Requirements' }],
+    approval: 4,
+    approvalBody: 'Approved requirements',
+  }
+  const previous = {
+    version: 1,
+    appId: 5,
+    pr: 6,
+    branch: 'spec/2',
+    head: head.sha,
+    publisherRunId: 7,
+  }
+  const event = {
+    action: 'created',
+    repository: { full_name: repository },
+    issue: { number: previous.pr, pull_request: {} },
+    comment: { id: 8, body: '/oc fix 7 complete #3', user: human, author_association: 'OWNER' },
+  }
+  const responses = {
+    '/pulls/6': { number: 6, head, base: { sha: trustedSha }, user: { id: previous.appId } },
+    '/actions/runs/7': {
+      path: '.github/workflows/opencode-implement.yml',
+      event: 'workflow_dispatch',
+      head_branch: 'main',
+      head_sha: trustedSha,
+      repository: { full_name: repository },
+    },
+    '/issues/3': original.snapshots[0],
+    '/issues/6': { title: 'Draft PR' },
+    '/issues/6/comments?per_page=100&page=1': [],
+    '/issues/comments/4': {
+      body: original.approvalBody,
+      issue_url: `https://api.github.com/repos/${repository}/issues/1`,
+      user: human,
+      author_association: 'OWNER',
+    },
+  }
+  for (const phase of ['first', 'single']) {
+    const { context } = await repairContext(
+      'issue_comment',
+      event,
+      previous,
+      { ...original, initial: true, phase },
+      async (path, accept) => (accept === 'application/vnd.github.diff' ? '' : responses[path]),
+      { appId: previous.appId, runId: 9, trustedSha },
+    )
+    assert.match(context.commitDate, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+    assert.equal(context.expectedHead, previous.head)
+    assert.equal(context.repair.previousRunId, previous.publisherRunId)
+  }
+})
+
+test('a skipped candidate verification does not request publisher approval', () => {
+  const workflow = readFileSync(
+    new URL('../.github/workflows/opencode.yml', import.meta.url),
+    'utf8',
+  )
+  const checkStart = workflow.indexOf('\n  implementation-check:')
+  const publisherStart = workflow.indexOf('\n  implementation-publish:', checkStart)
+  const check = workflow.slice(checkStart, publisherStart)
+  const publisher = workflow.slice(publisherStart)
+
+  assert.match(check, /verified: \$\{\{ steps\.verify\.outcome \}\}/)
+  assert.match(check, /id: verify\s+run: node scripts\/implementation-repair\.mjs verify/)
+  assert.match(publisher, /if: needs\.implementation-check\.outputs\.verified == 'success'/)
+  assert.match(publisher, /run: node scripts\/implementation-repair\.mjs gate/)
+})
+
+test('workflow requires admission before recording the marker or running the model', () => {
+  const workflow = readFileSync(
+    new URL('../.github/workflows/opencode.yml', import.meta.url),
+    'utf8',
+  )
+  const model = workflow.slice(
+    workflow.indexOf('\n  implementation-model:'),
+    workflow.indexOf('\n  implementation-check:'),
+  )
+  assert.match(model, /if: needs\.implementation-context\.result == 'success'/)
+  assert.match(model, /id: gate\s+run: node scripts\/implementation-repair\.mjs gate/)
+  assert.match(model, /name: implementation-admitted\s+if: steps\.gate\.outputs\.allowed == 'true'/)
+  assert.match(
+    model,
+    /if: steps\.gate\.outputs\.allowed == 'true'\s+run: node scripts\/implementation-repair\.mjs model/,
+  )
+})
 
 test('full and publisher-only reruns replace run-scoped artifacts without wildcard downloads', () => {
   for (const workflow of ['opencode.yml', 'implementation-publish.yml']) {
@@ -87,6 +182,13 @@ test('repair model has no write token and emits only the validated change object
     `import assert from 'node:assert/strict'
     assert.equal(process.env.GH_TOKEN, undefined)
     assert.equal(process.env.PUBLISH_APP_PRIVATE_KEY, undefined)
+    if (process.env.FAKE_PROVIDER_ERROR === '1') {
+      console.error('private stderr')
+      console.log(JSON.stringify({type: 'error', error: {
+        name: 'APIError', status: 429, message: 'private provider response',
+      }}))
+      process.exit(1)
+    }
     const emit = (type, messageID, part) => console.log(JSON.stringify({
       type, timestamp: 1, sessionID: 'ses_repair',
       part: { sessionID: 'ses_repair', messageID, ...part },
@@ -108,25 +210,37 @@ test('repair model has no write token and emits only the validated change object
     preload,
     `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module'; const original=cp.spawnSync; cp.spawnSync=(bin,args,opts)=>original(process.execPath,[${JSON.stringify(cli)}],opts); syncBuiltinESMExports();`,
   )
-  const result = spawnSync(
-    process.execPath,
-    [
-      '--import',
-      pathToFileURL(preload).href,
-      join(import.meta.dirname, 'implementation-repair.mjs'),
-      'model',
-    ],
-    {
-      env: {
-        ...process.env,
-        REPAIR_IO: dir,
-        OPENCODE_API_KEY: 'fake',
-        GH_TOKEN: 'write-token',
-        PUBLISH_APP_PRIVATE_KEY: 'key',
+  const runModel = (fakeProviderError) =>
+    spawnSync(
+      process.execPath,
+      [
+        '--import',
+        pathToFileURL(preload).href,
+        join(import.meta.dirname, 'implementation-repair.mjs'),
+        'model',
+      ],
+      {
+        env: {
+          ...process.env,
+          REPAIR_IO: dir,
+          OPENCODE_API_KEY: 'fake',
+          GH_TOKEN: 'write-token',
+          PUBLISH_APP_PRIVATE_KEY: 'key',
+          FAKE_PROVIDER_ERROR: fakeProviderError,
+          GITHUB_ACTIONS: 'true',
+          GITHUB_STEP_SUMMARY: join(dir, 'summary.md'),
+        },
+        encoding: 'utf8',
       },
-      encoding: 'utf8',
-    },
-  )
+    )
+  const failed = runModel('1')
+  const diagnostic = 'repair_failed phase=model operation=model category=provider_error status=429'
+  assert.equal(failed.status, 1)
+  assert.equal(failed.stdout, '')
+  assert.equal(failed.stderr.trim(), `::error::${diagnostic}`)
+  assert.equal(readFileSync(join(dir, 'summary.md'), 'utf8'), diagnostic + '\n')
+  assert.throws(() => readFileSync(join(dir, 'reply.json')), { code: 'ENOENT' })
+  const result = runModel('0')
   assert.equal(result.status, 0, result.stderr)
   const decoded = JSON.parse(readFileSync(join(dir, 'reply.json')))
   assert.deepEqual(decoded, reply)
