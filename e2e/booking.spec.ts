@@ -85,7 +85,7 @@ test('mobile guest keeps selected time and booking controls in view', async ({ p
   await expect(page.getByText(/\(МСК\)$/)).toContainText(time)
   await expect(page.getByText(/\(МСК\)$/)).toContainText(day.replace(/\s+\d{4}$/, ''))
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await page.getByRole('button', { name: 'Записаться ещё', exact: true }).click()
+  await page.getByRole('button', { name: 'Записаться на другую встречу', exact: true }).click()
   await page.getByRole('button', { name: /Mobile consultation/ }).click()
   await selectLastWorkingDay(page)
   const occupied = page.getByRole('button', { name: `${time} занято`, exact: true })
@@ -337,7 +337,7 @@ test('mobile guest reads an exhausted booking window', async ({ page }) => {
       await page.getByLabel('Ваше имя').fill('Full day guest')
       await page.getByRole('button', { name: 'Продолжить', exact: true }).click()
       await expect(page.getByRole('heading', { name: 'Встреча забронирована' })).toBeVisible()
-      await page.getByRole('button', { name: 'Записаться ещё', exact: true }).click()
+      await page.getByRole('button', { name: 'Записаться на другую встречу', exact: true }).click()
       await page.getByRole('button', { name: /Full working day/ }).click()
       await expect(page.getByRole('status', { name: 'Загрузка слотов' })).toHaveCount(0)
     }
