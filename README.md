@@ -118,7 +118,8 @@ OpenCode запускается в GitHub Actions. Основная модель
 - На итоговом SHA `ca1a9ebb734af2719200b8db6a0d9530ec464453` прошёл
   [CI](https://github.com/MeNn13/ai-for-developers-project-387/actions/runs/45664637776),
   опубликовано [независимое ревью](https://github.com/MeNn13/ai-for-developers-project-387/pull/76#issuecomment-7169677996)
-  и сохранён [браузерный артефакт](https://github.com/MeNn13/ai-for-developers-project-387/actions/runs/45664638091/artifacts/15046108332).
+  и сохранён артефакт `browser-pr-76-ca1a9ebb…` в
+  [браузерном прогоне](https://github.com/MeNn13/ai-for-developers-project-387/actions/runs/45664638091).
   В PR остались [личная браузерная приёмка](https://github.com/MeNn13/ai-for-developers-project-387/pull/76#issuecomment-7170091063),
   [разбор замечаний](https://github.com/MeNn13/ai-for-developers-project-387/pull/76#issuecomment-7170290193)
   и [логи падения и успешного прогона теста](https://github.com/MeNn13/ai-for-developers-project-387/pull/76#issuecomment-7170246222).
